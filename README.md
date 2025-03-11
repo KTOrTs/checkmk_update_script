@@ -32,11 +32,11 @@ cd checkmk_update_script
 
 3. Make the script executable:
 ```bash
-chmod +x checkmk_update.sh
+chmod +x cmkupdate.sh
 ```
 4. Run the script as root
 ```bash
-./checkmk_update.sh
+./cmkupdate.sh
 ```
 
 ---
