@@ -41,11 +41,10 @@ chmod +x checkmk_update.sh
 
 ---
 
-## 🔧 Configuration
-- Temporary directory: /tmp/cmkupdate
-- Debug log: /tmp/cmkupdate/checkmk_update_debug.log
-- You can monitor the log file during execution (The log file will be deleted if the installation was successful):
-```bash
+## ❓ Troubleshooting
+- If something goes wrong, the script will display an error and ask whether you want to continue.
+- Check the debug log for detailed output:
+```bash  
 tail -f /tmp/cmkupdate/checkmk_update_debug.log
 ```
 ---
