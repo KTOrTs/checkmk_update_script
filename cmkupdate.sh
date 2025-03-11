@@ -1,5 +1,11 @@
 #!/bin/bash
 
+#######################################
+# Checkmk Update Script
+# GitHub: https://github.com/KTOrTs/checkmk_update_script
+# Version: 1.0.0
+#######################################
+
 TMP_DIR="/tmp/cmkupdate"
 mkdir -p "$TMP_DIR"
 
@@ -11,6 +17,13 @@ TEXT_YELLOW='\e[0;33m'
 TEXT_GREEN='\e[0;32m'
 TEXT_RED='\e[0;31m'
 TEXT_BLUE='\e[0;34m'
+
+SCRIPT_VERSION="1.0.0"
+
+GITHUB_REPO="KTOrTs/checkmk_update_script"
+RAW_SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/checkmk_update.sh"
+GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+
 
 debug_log() {
     local message="[DEBUG] $1"
@@ -35,6 +48,61 @@ ask_continue_on_error() {
 final_cleanup() {
     debug_log "Cleaning up temporary files (directory ${TMP_DIR})."
     rm -rf "$TMP_DIR"
+}
+
+version_gt() {
+    test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"
+}
+
+check_for_new_script_version() {
+    echo -e "${TEXT_YELLOW}Checking for a new script version...${TEXT_RESET}"
+    debug_log "Checking GitHub API for the latest release."
+
+    LATEST_SCRIPT_VERSION=$(curl -s "$GITHUB_API_URL" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+
+    if [ -z "$LATEST_SCRIPT_VERSION" ]; then
+        debug_log "Failed to get latest version from GitHub API."
+        echo -e "${TEXT_RED}Failed to check for updates.${TEXT_RESET}"
+        return
+    fi
+
+    debug_log "Current script version: ${SCRIPT_VERSION}"
+    debug_log "Latest script version on GitHub: ${LATEST_SCRIPT_VERSION}"
+
+    if version_gt "$LATEST_SCRIPT_VERSION" "$SCRIPT_VERSION"; then
+        echo -e "${TEXT_GREEN}A new script version (${LATEST_SCRIPT_VERSION}) is available!${TEXT_RESET}"
+        while true; do
+            read -rp "Do you want to download and replace this script with the latest version? [y/n]: " update_choice
+            case "$update_choice" in
+                [Yy])
+                    debug_log "User chose to update the script to ${LATEST_SCRIPT_VERSION}."
+                    echo -e "${TEXT_YELLOW}Downloading the latest script...${TEXT_RESET}"
+                    curl -s -o "$0.new" "$RAW_SCRIPT_URL"
+                    CURL_EXIT=$?
+                    if [ $CURL_EXIT -ne 0 ]; then
+                        echo -e "${TEXT_RED}Failed to download the new script version.${TEXT_RESET}"
+                        debug_log "Failed to download the new script version (curl exit code: ${CURL_EXIT})"
+                        return
+                    fi
+                    mv "$0.new" "$0"
+                    chmod +x "$0"
+                    echo -e "${TEXT_GREEN}Script updated to version ${LATEST_SCRIPT_VERSION}. Please re-run the script.${TEXT_RESET}"
+                    debug_log "Script successfully updated to ${LATEST_SCRIPT_VERSION}. Exiting for re-run."
+                    exit 0
+                    ;;
+                [Nn])
+                    debug_log "User chose not to update the script."
+                    break
+                    ;;
+                *)
+                    echo "Please enter 'y' for Yes or 'n' for No."
+                    ;;
+            esac
+        done
+    else
+        echo -e "${TEXT_GREEN}You are using the latest script version (${SCRIPT_VERSION}).${TEXT_RESET}"
+        debug_log "Script is up to date (${SCRIPT_VERSION})."
+    fi
 }
 
 check_and_install_packages() {
@@ -81,6 +149,7 @@ check_and_install_packages() {
     fi
 }
 
+
 debug_log "---------------------------------"
 debug_log "Script start"
 debug_log "---------------------------------"
@@ -88,6 +157,9 @@ echo "Starting update script $(date)" > "$DEBUG_LOG_FILE"
 echo -e "${TEXT_BLUE}Debug log is located at: ${DEBUG_LOG_FILE}${TEXT_RESET}"
 echo -e "${TEXT_BLUE}Monitor with: ${TEXT_GREEN}tail -f ${DEBUG_LOG_FILE}${TEXT_RESET}\n"
 sleep 1
+
+# Versionsprüfung des Skripts
+check_for_new_script_version
 
 debug_log "---------------------------------"
 debug_log "Checking for root privileges"
