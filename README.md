@@ -7,7 +7,7 @@ This script simplifies the update process for Checkmk Raw Edition sites on Debia
 ## 🚀 Features
 
 - Automatically detects installed Checkmk sites
-- Checks for and installs missing required packages
+- Checks for missing packages and installs them
 - Downloads and installs the latest Checkmk Raw Edition package
 - Performs `omd update` on the selected site
 - Logs detailed debug information
