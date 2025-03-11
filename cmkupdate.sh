@@ -158,7 +158,6 @@ echo -e "${TEXT_BLUE}Debug log is located at: ${DEBUG_LOG_FILE}${TEXT_RESET}"
 echo -e "${TEXT_BLUE}Monitor with: ${TEXT_GREEN}tail -f ${DEBUG_LOG_FILE}${TEXT_RESET}\n"
 sleep 1
 
-# Versionsprüfung des Skripts
 check_for_new_script_version
 
 debug_log "---------------------------------"
