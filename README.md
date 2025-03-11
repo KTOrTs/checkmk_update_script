@@ -1,6 +1,6 @@
 # ✅ Checkmk Update Script
 
-This script automates the update process for **Checkmk Raw Edition** sites on Debian/Ubuntu systems.
+This script simplifies the update process for Checkmk Raw Edition sites on Debian/Ubuntu systems.
 
 ---
 
