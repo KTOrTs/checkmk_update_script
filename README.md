@@ -1,31 +1,55 @@
-Checkmk Update Script - Installation Guide
-This script automates the process of updating a Checkmk Raw Edition site. It verifies system requirements, downloads the latest available package, installs it, and performs an omd update.
+# ✅ Checkmk Update Script
 
-🛠 Prerequisites
-OS: Debian/Ubuntu (tested)
+This script automates the update process for **Checkmk Raw Edition** sites on Debian/Ubuntu systems.
 
-User: Root privileges required
+---
 
-Dependencies: git, curl, wget, dpkg, awk, grep, lsb_release
+## 🚀 Features
 
+- Automatically detects installed Checkmk sites
+- Checks for and installs missing required packages
+- Downloads and installs the latest Checkmk Raw Edition package
+- Performs `omd update` on the selected site
+- Logs detailed debug information
+- Includes safety checks (disk space, root permissions, etc.)
 
+---
 
-🚀 Installation Steps
-Clone the GitHub repository:
+## ⚠️ Perform a manual backup before executing the script!
+## 📥 Installation
 
+### Clone this repository and make the script executable
+
+```bash
 git clone https://github.com/KTOrTs/checkmk_update_script.git
+```
 
-Navigate to the repository directory:
+2. Change into the repository directory
 
+```bash
 cd checkmk_update_script
+```
 
-Make the script executable:
-
+3. Make the script executable:
+```bash
 chmod +x checkmk_update.sh
-
-
-⚠️ Perform a manual backup before executing the script!
-
-Run the script as root:
-
+```
+4. Run the script as root
+```bash
 ./checkmk_update.sh
+```
+
+---
+
+## 🔧 Configuration
+- Temporary directory: /tmp/cmkupdate
+- Debug log: /tmp/cmkupdate/checkmk_update_debug.log
+- You can monitor the log file during execution (The log file will be deleted if the installation was successful):
+```bash
+tail -f /tmp/cmkupdate/checkmk_update_debug.log
+```
+---
+## 💡 Disclaimer
+This script is provided "as is" without warranty of any kind. Use it at your own risk!
+Test in a staging environment before running in production.
+
