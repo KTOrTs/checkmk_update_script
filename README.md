@@ -15,7 +15,7 @@ This script simplifies the update process for Checkmk Raw Edition sites on Debia
 
 ---
 
-## ⚠️ Perform a manual backup before executing the script!
+## ⚠️ Perform a manual Backup before executing the script!
 ## 📥 Installation
 
 ### Clone this repository and make the script executable
