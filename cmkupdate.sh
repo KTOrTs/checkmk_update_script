@@ -290,9 +290,10 @@ DOWNLOAD_URL="https://download.checkmk.com/checkmk/${LATEST_VERSION}/${UPDATE_PA
 debug_log "Update package: ${UPDATE_PACKAGE}"
 debug_log "Download URL: ${DOWNLOAD_URL}"
 
-wget -q "$DOWNLOAD_URL" -O "${TMP_DIR}/${UPDATE_PACKAGE}"
+wget -q --show-progress --progress=bar:force -O "${TMP_DIR}/${UPDATE_PACKAGE}" "$DOWNLOAD_URL"
 WGET_EXIT=$?
 debug_log "wget download -> Exit code: ${WGET_EXIT}"
+
 
 if [ $WGET_EXIT -ne 0 ]; then
     ask_continue_on_error "Error downloading the update package (wget exit code: ${WGET_EXIT})"
