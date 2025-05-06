@@ -3,7 +3,7 @@
 #######################################
 # Checkmk Update Script
 # GitHub: https://github.com/KTOrTs/checkmk_update_script
-# Version: 1.0.0
+# Version: 1.1.0
 #######################################
 
 TMP_DIR="/tmp/cmkupdate"
@@ -18,7 +18,7 @@ TEXT_GREEN='\e[0;32m'
 TEXT_RED='\e[0;31m'
 TEXT_BLUE='\e[0;34m'
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 
 GITHUB_REPO="KTOrTs/checkmk_update_script"
 RAW_SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/checkmk_update.sh"
@@ -58,16 +58,26 @@ check_for_new_script_version() {
     echo -e "${TEXT_YELLOW}Checking for a new script version...${TEXT_RESET}"
     debug_log "Checking GitHub API for the latest release."
 
-    LATEST_SCRIPT_VERSION=$(curl -s "$GITHUB_API_URL" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    API_RESPONSE=$(curl -s --fail "$GITHUB_API_URL")
+
+    if [ $? -ne 0 ] || [[ "$API_RESPONSE" == *"API rate limit exceeded"* ]]; then
+        debug_log "GitHub API request failed or rate limit exceeded."
+        echo -e "${TEXT_YELLOW}Could not check for updates (API limit or connection issue).${TEXT_RESET}"
+        return
+    fi
+
+    LATEST_SCRIPT_VERSION=$(echo "$API_RESPONSE" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
     if [ -z "$LATEST_SCRIPT_VERSION" ]; then
-        debug_log "Failed to get latest version from GitHub API."
-        echo -e "${TEXT_RED}Failed to check for updates.${TEXT_RESET}"
+        debug_log "Failed to extract latest version from API response."
+        echo -e "${TEXT_YELLOW}Could not determine latest version.${TEXT_RESET}"
         return
     fi
 
     debug_log "Current script version: ${SCRIPT_VERSION}"
     debug_log "Latest script version on GitHub: ${LATEST_SCRIPT_VERSION}"
+
+
 
     if version_gt "$LATEST_SCRIPT_VERSION" "$SCRIPT_VERSION"; then
         echo -e "${TEXT_GREEN}A new script version (${LATEST_SCRIPT_VERSION}) is available!${TEXT_RESET}"
@@ -244,15 +254,15 @@ debug_log "Checking for latest version"
 debug_log "---------------------------------"
 echo -e "${TEXT_YELLOW}Checking for the latest available Checkmk version...${TEXT_RESET}"
 TMP_FILE="${TMP_DIR}/checkmk_versions.html"
-curl -s https://checkmk.com/de/download -o "$TMP_FILE"
+curl -s https://checkmk.com/download -o "$TMP_FILE"
 CURL_EXIT=$?
-debug_log "curl -s https://checkmk.com/de/download -> Exit code: ${CURL_EXIT}"
+debug_log "curl -s https://checkmk.com/download -> Exit code: ${CURL_EXIT}"
 
 if [ $CURL_EXIT -ne 0 ]; then
     ask_continue_on_error "Error fetching Checkmk versions (curl exit code: ${CURL_EXIT})"
 fi
 
-LATEST_VERSION=$(grep -oP '(?<=check-mk-raw-)[0-9]+\.[0-9]+\.[0-9]+p[0-9]+' "$TMP_FILE" | sort -Vr | head -n 1)
+LATEST_VERSION=$(grep -oP '(?<=check-mk-raw-)[0-9]+\.[0-9]+\.[0-9]+(?:p[0-9]+)?' "$TMP_FILE" | sort -V | tail -n 1)
 debug_log "Latest detected version: ${LATEST_VERSION}"
 
 if [ -z "$LATEST_VERSION" ]; then
