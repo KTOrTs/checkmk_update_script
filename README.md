@@ -8,14 +8,16 @@ This script simplifies the update process for Checkmk Raw Edition sites on Debia
 
 - Automatically detects installed Checkmk sites
 - Checks for missing packages and installs them
+- Stops the site before creating an OMD backup to reduce load and keep the archive consistent (stored in `/var/backups/checkmk`)
+- Shows the estimated backup size (calculated from `du -sk /opt/omd/sites/<SITE>`, uncompressed) and live archive growth while the compressed backup runs, including the final compression ratio
+- Optional self-test mode to verify prerequisites before running an update
 - Downloads and installs the latest Checkmk Raw Edition package
+- Checks GitHub for script updates with a time-limited request
 - Performs `omd update` on the selected site
 - Logs detailed debug information
 - Includes safety checks (disk space, root permissions, etc.)
 
 ---
-
-## ⚠️ Perform a manual Backup before executing the script!
 ## 📥 Installation
 
 1. Clone this repository and make the script executable
@@ -44,9 +46,23 @@ chmod +x cmkupdate.sh
 ## ❓ Troubleshooting
 - If something goes wrong, the script will display an error and ask whether you want to continue.
 - Check the debug log for detailed output:
-```bash  
+```bash
 tail -f /tmp/cmkupdate/checkmk_update_debug.log
 ```
+
+---
+## 🔄 Restore from Backup
+1. Choose the appropriate backup path in `/var/backups/checkmk` (example: `my-site_20240101_120000.omd.gz`).
+2. Confirm the target site name or create a new site if necessary.
+3. Restore the backup with `omd restore`:
+   ```bash
+   omd restore <SITE_NAME> /var/backups/checkmk/<FILE>.omd.gz
+   ```
+4. Start the site again (if it is stopped):
+   ```bash
+   omd start <SITE_NAME>
+   ```
+All steps require root privileges.
 ---
 ## 💡 Disclaimer
 This script is provided "as is" without warranty of any kind. Use it at your own risk!
