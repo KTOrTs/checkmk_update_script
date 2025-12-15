@@ -3,7 +3,7 @@
 #######################################
 # Checkmk Update Script
 # GitHub: https://github.com/KTOrTs/checkmk_update_script
-# Version: 1.2.3
+# Version: 1.2.4
 #######################################
 
 TMP_DIR="/tmp/cmkupdate"
@@ -18,7 +18,7 @@ TEXT_GREEN='\e[0;32m'
 TEXT_RED='\e[0;31m'
 TEXT_BLUE='\e[0;34m'
 
-SCRIPT_VERSION="1.2.3"
+SCRIPT_VERSION="1.2.4"
 
 SCRIPT_UPDATE_TIMEOUT=15
 
@@ -421,6 +421,20 @@ if [ "$INSTALLED_VERSION" == "$LATEST_VERSION.cre" ]; then
     exit 0
 fi
 
+debug_log "---------------------------------"
+debug_log "Stopping Checkmk site before backup"
+debug_log "---------------------------------"
+echo -e "${TEXT_YELLOW}Stopping Checkmk site (${CHECKMK_SITE}) for a consistent backup...${TEXT_RESET}"
+omd stop "$CHECKMK_SITE" &>> "$DEBUG_LOG_FILE"
+STOP_EXIT=$?
+debug_log "omd stop (pre-backup) -> Exit code: ${STOP_EXIT}"
+
+if [ $STOP_EXIT -ne 0 ]; then
+    ask_continue_on_error "Error stopping the site before backup (omd stop exit code: ${STOP_EXIT})"
+else
+    debug_log "Site ${CHECKMK_SITE} stopped prior to backup."
+fi
+
 create_site_backup
 
 debug_log "---------------------------------"
@@ -470,20 +484,6 @@ if [ $DPKG_EXIT -ne 0 ]; then
     ask_continue_on_error "Error during installation (dpkg exit code: ${DPKG_EXIT})"
 else
     debug_log "Update package installed successfully."
-fi
-
-debug_log "---------------------------------"
-debug_log "Stopping Checkmk site"
-debug_log "---------------------------------"
-echo -e "${TEXT_YELLOW}Stopping Checkmk site (${CHECKMK_SITE})...${TEXT_RESET}"
-omd stop "$CHECKMK_SITE" &>> "$DEBUG_LOG_FILE"
-STOP_EXIT=$?
-debug_log "omd stop -> Exit code: ${STOP_EXIT}"
-
-if [ $STOP_EXIT -ne 0 ]; then
-    ask_continue_on_error "Error stopping the site (omd stop exit code: ${STOP_EXIT})"
-else
-    debug_log "Site ${CHECKMK_SITE} stopped."
 fi
 
 debug_log "--------------------------------------------------"
