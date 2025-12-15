@@ -3,7 +3,7 @@
 #######################################
 # Checkmk Update Script
 # GitHub: https://github.com/KTOrTs/checkmk_update_script
-# Version: 1.2.4
+# Version: 1.2.5
 #######################################
 
 TMP_DIR="/tmp/cmkupdate"
@@ -18,7 +18,7 @@ TEXT_GREEN='\e[0;32m'
 TEXT_RED='\e[0;31m'
 TEXT_BLUE='\e[0;34m'
 
-SCRIPT_VERSION="1.2.4"
+SCRIPT_VERSION="1.2.5"
 
 SCRIPT_UPDATE_TIMEOUT=15
 
@@ -145,27 +145,59 @@ create_site_backup() {
     fi
 
     local backup_file="${BACKUP_DIR}/${CHECKMK_SITE}_$(date +%Y%m%d_%H%M%S).omd.gz"
-    local site_size_kb available_kb
+    local site_size_kb available_kb site_size_mb_display
 
     site_size_kb=$(du -sk "$CHECKMK_DIR" 2>>"$DEBUG_LOG_FILE" | awk '{print $1}')
     available_kb=$(df --output=avail "$BACKUP_DIR" | tail -n 1)
 
+    if [[ -n "$site_size_kb" ]]; then
+        site_size_mb_display=$(awk -v kb="$site_size_kb" 'BEGIN { printf "%.2f", kb/1024 }')
+    else
+        site_size_mb_display="unknown"
+    fi
+
     debug_log "Estimated site size: ${site_size_kb:-unknown} KB"
     debug_log "Available space in backup target: ${available_kb:-unknown} KB"
+
+    echo -e "${TEXT_YELLOW}Estimated site size: ${site_size_mb_display} MB${TEXT_RESET}"
 
     if [[ -n "$site_size_kb" && -n "$available_kb" ]] && (( available_kb < site_size_kb * 2 )); then
         ask_continue_on_error "Potentially insufficient space for backup in ${BACKUP_DIR}. Required (approx): $((site_size_kb * 2)) KB, available: ${available_kb} KB"
     fi
 
     echo -e "${TEXT_YELLOW}Creating backup for site ${CHECKMK_SITE}...${TEXT_RESET}"
-    omd backup "$CHECKMK_SITE" "$backup_file" &>> "$DEBUG_LOG_FILE"
+    omd backup "$CHECKMK_SITE" "$backup_file" &>> "$DEBUG_LOG_FILE" &
+    BACKUP_PID=$!
+
+    while kill -0 "$BACKUP_PID" 2>/dev/null; do
+        local current_bytes current_mb
+
+        if [ -f "$backup_file" ]; then
+            current_bytes=$(stat -c%s "$backup_file" 2>/dev/null || echo 0)
+            current_mb=$(awk -v bytes="$current_bytes" 'BEGIN { printf "%.2f", bytes/1048576 }')
+        else
+            current_mb="0.00"
+        fi
+
+        printf "\r${TEXT_BLUE}Backup progress: estimated %s MB | current %s MB${TEXT_RESET}" "${site_size_mb_display}" "${current_mb}"
+        sleep 2
+    done
+
+    wait "$BACKUP_PID"
     BACKUP_EXIT=$?
+    echo
     debug_log "omd backup -> Exit code: ${BACKUP_EXIT}; File: ${backup_file}"
 
     if [ $BACKUP_EXIT -ne 0 ]; then
         ask_continue_on_error "Backup failed for ${CHECKMK_SITE} (exit code: ${BACKUP_EXIT}). See ${DEBUG_LOG_FILE} for details."
     else
         echo -e "${TEXT_GREEN}Backup created at ${backup_file}${TEXT_RESET}"
+        if [ -f "$backup_file" ]; then
+            local final_bytes final_mb
+            final_bytes=$(stat -c%s "$backup_file" 2>/dev/null || echo 0)
+            final_mb=$(awk -v bytes="$final_bytes" 'BEGIN { printf "%.2f", bytes/1048576 }')
+            debug_log "Backup size on disk: ${final_bytes} bytes (${final_mb} MB)"
+        fi
         debug_log "Backup successfully created at ${backup_file}"
         debug_log "Restore hint: omd restore ${CHECKMK_SITE} ${backup_file}"
         echo -e "${TEXT_BLUE}To restore this backup later, run: omd restore ${CHECKMK_SITE} ${backup_file}${TEXT_RESET}"
