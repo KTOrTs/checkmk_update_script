@@ -156,10 +156,10 @@ create_site_backup() {
         site_size_mb_display="unknown"
     fi
 
-    debug_log "Estimated site size: ${site_size_kb:-unknown} KB"
+    debug_log "Estimated site size (du -sk ${CHECKMK_DIR}): ${site_size_kb:-unknown} KB"
     debug_log "Available space in backup target: ${available_kb:-unknown} KB"
 
-    echo -e "${TEXT_YELLOW}Estimated site size: ${site_size_mb_display} MB${TEXT_RESET}"
+    echo -e "${TEXT_YELLOW}Estimated site size (du -sk ${CHECKMK_DIR}): ${site_size_mb_display} MB${TEXT_RESET}"
 
     if [[ -n "$site_size_kb" && -n "$available_kb" ]] && (( available_kb < site_size_kb * 2 )); then
         ask_continue_on_error "Potentially insufficient space for backup in ${BACKUP_DIR}. Required (approx): $((site_size_kb * 2)) KB, available: ${available_kb} KB"
