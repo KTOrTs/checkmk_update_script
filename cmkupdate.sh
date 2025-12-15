@@ -3,7 +3,7 @@
 #######################################
 # Checkmk Update Script
 # GitHub: https://github.com/KTOrTs/checkmk_update_script
-# Version: 1.2.0
+# Version: 1.2.1
 #######################################
 
 TMP_DIR="/tmp/cmkupdate"
@@ -18,7 +18,9 @@ TEXT_GREEN='\e[0;32m'
 TEXT_RED='\e[0;31m'
 TEXT_BLUE='\e[0;34m'
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
+
+SCRIPT_UPDATE_TIMEOUT=15
 
 BACKUP_DIR="/var/backups/checkmk"
 
@@ -172,11 +174,18 @@ check_for_new_script_version() {
     echo -e "${TEXT_YELLOW}Checking for a new script version...${TEXT_RESET}"
     debug_log "Checking GitHub API for the latest release."
 
-    API_RESPONSE=$(curl -s --fail "$GITHUB_API_URL")
+    API_RESPONSE=$(curl -s --fail --max-time "$SCRIPT_UPDATE_TIMEOUT" "$GITHUB_API_URL" 2>>"$DEBUG_LOG_FILE")
+    CURL_EXIT=$?
+    debug_log "GitHub API curl exit code: ${CURL_EXIT} (timeout: ${SCRIPT_UPDATE_TIMEOUT}s)"
 
-    if [ $? -ne 0 ] || [[ "$API_RESPONSE" == *"API rate limit exceeded"* ]]; then
-        debug_log "GitHub API request failed or rate limit exceeded."
-        echo -e "${TEXT_YELLOW}Could not check for updates (API limit or connection issue).${TEXT_RESET}"
+    if [ $CURL_EXIT -ne 0 ] || [[ "$API_RESPONSE" == *"API rate limit exceeded"* ]]; then
+        if [ $CURL_EXIT -eq 28 ]; then
+            debug_log "GitHub API request timed out after ${SCRIPT_UPDATE_TIMEOUT} seconds."
+            echo -e "${TEXT_YELLOW}GitHub update check timed out after ${SCRIPT_UPDATE_TIMEOUT}s.${TEXT_RESET}"
+        else
+            debug_log "GitHub API request failed or rate limit exceeded."
+            echo -e "${TEXT_YELLOW}Could not check for updates (API limit or connection issue).${TEXT_RESET}"
+        fi
         return
     fi
 
@@ -201,7 +210,7 @@ check_for_new_script_version() {
                 [Yy])
                     debug_log "User chose to update the script to ${LATEST_SCRIPT_VERSION}."
                     echo -e "${TEXT_YELLOW}Downloading the latest script...${TEXT_RESET}"
-                    curl -s -o "$0.new" "$RAW_SCRIPT_URL"
+                    curl -s --max-time "$SCRIPT_UPDATE_TIMEOUT" -o "$0.new" "$RAW_SCRIPT_URL" 2>>"$DEBUG_LOG_FILE"
                     CURL_EXIT=$?
                     if [ $CURL_EXIT -ne 0 ]; then
                         echo -e "${TEXT_RED}Failed to download the new script version.${TEXT_RESET}"

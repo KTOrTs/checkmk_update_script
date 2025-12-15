@@ -11,6 +11,7 @@ This script simplifies the update process for Checkmk Raw Edition sites on Debia
 - Creates an OMD backup of the selected site before upgrading (stored in `/var/backups/checkmk`)
 - Optional self-test mode to verify prerequisites before running an update
 - Downloads and installs the latest Checkmk Raw Edition package
+- Checks GitHub for script updates with a time-limited request
 - Performs `omd update` on the selected site
 - Logs detailed debug information
 - Includes safety checks (disk space, root permissions, etc.)
