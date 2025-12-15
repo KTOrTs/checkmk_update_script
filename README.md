@@ -45,9 +45,23 @@ chmod +x cmkupdate.sh
 ## ❓ Troubleshooting
 - If something goes wrong, the script will display an error and ask whether you want to continue.
 - Check the debug log for detailed output:
-```bash  
+```bash
 tail -f /tmp/cmkupdate/checkmk_update_debug.log
 ```
+
+---
+## 🔄 Restore aus dem Backup
+1. Den passenden Backup-Pfad im Verzeichnis `/var/backups/checkmk` auswählen (Beispiel: `my-site_20240101_120000.omd.gz`).
+2. Den Ziel-Site-Namen kontrollieren oder bei Bedarf eine neue Site anlegen.
+3. Das Backup mit `omd restore` einspielen:
+   ```bash
+   omd restore <SITE_NAME> /var/backups/checkmk/<DATEI>.omd.gz
+   ```
+4. Die Site wieder starten (falls sie gestoppt ist):
+   ```bash
+   omd start <SITE_NAME>
+   ```
+Alle Schritte benötigen Root-Rechte.
 ---
 ## 💡 Disclaimer
 This script is provided "as is" without warranty of any kind. Use it at your own risk!

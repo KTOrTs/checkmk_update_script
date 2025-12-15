@@ -3,7 +3,7 @@
 #######################################
 # Checkmk Update Script
 # GitHub: https://github.com/KTOrTs/checkmk_update_script
-# Version: 1.2.1
+# Version: 1.2.2
 #######################################
 
 TMP_DIR="/tmp/cmkupdate"
@@ -18,7 +18,7 @@ TEXT_GREEN='\e[0;32m'
 TEXT_RED='\e[0;31m'
 TEXT_BLUE='\e[0;34m'
 
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.2.2"
 
 SCRIPT_UPDATE_TIMEOUT=15
 
@@ -167,6 +167,8 @@ create_site_backup() {
     else
         echo -e "${TEXT_GREEN}Backup created at ${backup_file}${TEXT_RESET}"
         debug_log "Backup successfully created at ${backup_file}"
+        debug_log "Restore hint: omd restore ${CHECKMK_SITE} ${backup_file}"
+        echo -e "${TEXT_BLUE}To restore this backup later, run: omd restore ${CHECKMK_SITE} ${backup_file}${TEXT_RESET}"
     fi
 }
 
