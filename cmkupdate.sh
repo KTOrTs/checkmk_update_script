@@ -3,7 +3,7 @@
 #######################################
 # Checkmk Update Script
 # GitHub: https://github.com/KTOrTs/checkmk_update_script
-# Version: 1.1.0
+# Version: 1.1.1
 #######################################
 
 TMP_DIR="/tmp/cmkupdate"
@@ -18,7 +18,7 @@ TEXT_GREEN='\e[0;32m'
 TEXT_RED='\e[0;31m'
 TEXT_BLUE='\e[0;34m'
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.1.1"
 
 GITHUB_REPO="KTOrTs/checkmk_update_script"
 RAW_SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/checkmk_update.sh"
@@ -168,8 +168,6 @@ echo -e "${TEXT_BLUE}Debug log is located at: ${DEBUG_LOG_FILE}${TEXT_RESET}"
 echo -e "${TEXT_BLUE}Monitor with: ${TEXT_GREEN}tail -f ${DEBUG_LOG_FILE}${TEXT_RESET}\n"
 sleep 1
 
-check_for_new_script_version
-
 debug_log "---------------------------------"
 debug_log "Checking for root privileges"
 debug_log "---------------------------------"
@@ -180,15 +178,30 @@ if (( EUID != 0 )); then
     exit 1
 fi
 
+check_for_new_script_version
+
 check_and_install_packages
 
 debug_log "--------------------------------------------------"
 debug_log "Fetching available Checkmk sites via 'omd sites'..."
 debug_log "--------------------------------------------------"
 
+if ! command -v omd &> /dev/null; then
+    error_msg="The 'omd' command is not available. Please install Checkmk before running this script."
+    echo -e "${TEXT_RED}${error_msg}${TEXT_RESET}"
+    debug_log "$error_msg"
+    exit 1
+fi
+
 OMD_SITES_RAW=$(omd sites 2>&1)
+OMD_SITES_EXIT=$?
 debug_log "Raw output from 'omd sites':"
 debug_log "$OMD_SITES_RAW"
+debug_log "'omd sites' exit code: ${OMD_SITES_EXIT}"
+
+if [ $OMD_SITES_EXIT -ne 0 ]; then
+    ask_continue_on_error "Failed to list Checkmk sites (omd sites exit code: ${OMD_SITES_EXIT})"
+fi
 
 CHECKMK_SITES=($(echo "$OMD_SITES_RAW" | grep -v "^SITE" | awk '{print $1}'))
 debug_log "Detected sites: ${CHECKMK_SITES[*]}"
@@ -227,6 +240,10 @@ CHECKMK_DIR="/opt/omd/sites/${CHECKMK_SITE}"
 INSTALLED_VERSION=$(omd version | awk '{print $NF}')
 DISTRO=$(lsb_release -sc)
 ARCH=$(dpkg --print-architecture)
+
+if [ -z "$INSTALLED_VERSION" ]; then
+    ask_continue_on_error "Could not determine installed Checkmk version via 'omd version'."
+fi
 
 debug_log "Site name: ${CHECKMK_SITE}"
 debug_log "Site directory: ${CHECKMK_DIR}"
