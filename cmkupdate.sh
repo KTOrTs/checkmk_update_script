@@ -22,9 +22,76 @@ SCRIPT_VERSION="1.2.0"
 
 BACKUP_DIR="/var/backups/checkmk"
 
+SELF_TEST=0
+
 GITHUB_REPO="KTOrTs/checkmk_update_script"
 RAW_SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/checkmk_update.sh"
 GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+
+print_usage() {
+    cat <<EOF
+Usage: $0 [options]
+
+Options:
+  -h, --help        Show this help text and exit.
+  -t, --self-test   Run a fast dependency and syntax check without performing updates.
+EOF
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+            -t|--self-test)
+                SELF_TEST=1
+                ;;
+            *)
+                echo -e "${TEXT_RED}Unknown option: $1${TEXT_RESET}" >&2
+                print_usage
+                exit 1
+                ;;
+        esac
+        shift
+    done
+}
+
+run_self_test() {
+    debug_log "---------------------------------"
+    debug_log "Running self-test"
+    debug_log "---------------------------------"
+
+    echo -e "${TEXT_YELLOW}Running self-test (syntax and dependency check)...${TEXT_RESET}" 
+
+    if bash -n "$0"; then
+        debug_log "Syntax check passed."
+    else
+        debug_log "Syntax check failed."
+        echo -e "${TEXT_RED}Syntax check failed. See ${DEBUG_LOG_FILE} for details.${TEXT_RESET}" 
+        exit 1
+    fi
+
+    local required=(omd lsb_release wget curl dpkg awk grep df sort)
+    local missing=()
+
+    for cmd in "${required[@]}"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo -e "${TEXT_RED}Missing required commands: ${missing[*]}${TEXT_RESET}" 
+        debug_log "Self-test failed. Missing: ${missing[*]}"
+        exit 1
+    fi
+
+    debug_log "Self-test completed successfully."
+    echo -e "${TEXT_GREEN}Self-test succeeded. All required commands are available.${TEXT_RESET}" 
+    exit 0
+}
 
 
 debug_log() {
@@ -216,6 +283,12 @@ echo "Starting update script $(date)" > "$DEBUG_LOG_FILE"
 echo -e "${TEXT_BLUE}Debug log is located at: ${DEBUG_LOG_FILE}${TEXT_RESET}"
 echo -e "${TEXT_BLUE}Monitor with: ${TEXT_GREEN}tail -f ${DEBUG_LOG_FILE}${TEXT_RESET}\n"
 sleep 1
+
+parse_args "$@"
+
+if (( SELF_TEST )); then
+    run_self_test
+fi
 
 check_for_new_script_version
 
