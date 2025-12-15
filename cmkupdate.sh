@@ -3,7 +3,7 @@
 #######################################
 # Checkmk Update Script
 # GitHub: https://github.com/KTOrTs/checkmk_update_script
-# Version: 1.2.2
+# Version: 1.2.3
 #######################################
 
 TMP_DIR="/tmp/cmkupdate"
@@ -18,7 +18,7 @@ TEXT_GREEN='\e[0;32m'
 TEXT_RED='\e[0;31m'
 TEXT_BLUE='\e[0;34m'
 
-SCRIPT_VERSION="1.2.2"
+SCRIPT_VERSION="1.2.3"
 
 SCRIPT_UPDATE_TIMEOUT=15
 
@@ -433,15 +433,29 @@ DOWNLOAD_URL="https://download.checkmk.com/checkmk/${LATEST_VERSION}/${UPDATE_PA
 debug_log "Update package: ${UPDATE_PACKAGE}"
 debug_log "Download URL: ${DOWNLOAD_URL}"
 
-wget -q --show-progress --progress=bar:force -O "${TMP_DIR}/${UPDATE_PACKAGE}" "$DOWNLOAD_URL"
-WGET_EXIT=$?
-debug_log "wget download -> Exit code: ${WGET_EXIT}"
+CONTENT_LENGTH_BYTES=$(curl -sI "$DOWNLOAD_URL" 2>>"$DEBUG_LOG_FILE" | awk '/[Cc]ontent-[Ll]ength/ {print $2}' | tr -d '\r')
 
-
-if [ $WGET_EXIT -ne 0 ] || [ ! -s "${TMP_DIR}/${UPDATE_PACKAGE}" ]; then
-    ask_continue_on_error "Error downloading the update package (wget exit code: ${WGET_EXIT})"
+if [[ -n "$CONTENT_LENGTH_BYTES" ]]; then
+    CONTENT_LENGTH_MB=$(awk -v bytes="$CONTENT_LENGTH_BYTES" 'BEGIN { printf "%.2f", bytes/1048576 }')
+    echo -e "${TEXT_YELLOW}Estimated download size: ${CONTENT_LENGTH_MB} MB${TEXT_RESET}"
+    debug_log "Expected download size: ${CONTENT_LENGTH_BYTES} bytes (${CONTENT_LENGTH_MB} MB)"
 else
-    debug_log "Download successful. File: ${TMP_DIR}/${UPDATE_PACKAGE}"
+    echo -e "${TEXT_YELLOW}Estimated download size: unknown (server did not provide Content-Length)${TEXT_RESET}"
+    debug_log "Content-Length header missing; proceeding without size hint"
+fi
+
+if ! curl --fail --location --progress-bar -o "${TMP_DIR}/${UPDATE_PACKAGE}" "$DOWNLOAD_URL"; then
+    CURL_EXIT=$?
+    debug_log "curl download failed -> Exit code: ${CURL_EXIT}"
+    ask_continue_on_error "Error downloading the update package (curl exit code: ${CURL_EXIT})"
+elif [ ! -s "${TMP_DIR}/${UPDATE_PACKAGE}" ]; then
+    debug_log "curl reported success but produced an empty file"
+    ask_continue_on_error "Download finished but the package file is empty."
+else
+    DOWNLOADED_BYTES=$(stat -c%s "${TMP_DIR}/${UPDATE_PACKAGE}")
+    DOWNLOADED_MB=$(awk -v bytes="$DOWNLOADED_BYTES" 'BEGIN { printf "%.2f", bytes/1048576 }')
+    debug_log "Download successful. File: ${TMP_DIR}/${UPDATE_PACKAGE} (${DOWNLOADED_BYTES} bytes/${DOWNLOADED_MB} MB)"
+    echo -e "${TEXT_GREEN}Download completed: ${DOWNLOADED_MB} MB${TEXT_RESET}"
 fi
 
 debug_log "---------------------------------"
