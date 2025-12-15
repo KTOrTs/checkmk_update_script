@@ -3,7 +3,7 @@
 #######################################
 # Checkmk Update Script
 # GitHub: https://github.com/KTOrTs/checkmk_update_script
-# Version: 1.1.0
+# Version: 1.2.0
 #######################################
 
 TMP_DIR="/tmp/cmkupdate"
@@ -18,7 +18,9 @@ TEXT_GREEN='\e[0;32m'
 TEXT_RED='\e[0;31m'
 TEXT_BLUE='\e[0;34m'
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
+
+BACKUP_DIR="/var/backups/checkmk"
 
 GITHUB_REPO="KTOrTs/checkmk_update_script"
 RAW_SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/checkmk_update.sh"
@@ -46,12 +48,57 @@ ask_continue_on_error() {
 }
 
 final_cleanup() {
-    debug_log "Cleaning up temporary files (directory ${TMP_DIR})."
-    rm -rf "$TMP_DIR"
+    debug_log "Final cleanup triggered for ${TMP_DIR} (preserving debug log)."
+    find "$TMP_DIR" -mindepth 1 -maxdepth 1 ! -name "$(basename "$DEBUG_LOG_FILE")" -exec rm -rf {} +
+}
+
+ensure_omd_available() {
+    if ! command -v omd &> /dev/null; then
+        local error_msg="The 'omd' command is not available. Please install Checkmk before running this script."
+        echo -e "${TEXT_RED}${error_msg}${TEXT_RESET}"
+        debug_log "$error_msg"
+        exit 1
+    fi
 }
 
 version_gt() {
     test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"
+}
+
+create_site_backup() {
+    debug_log "---------------------------------"
+    debug_log "Creating site backup"
+    debug_log "---------------------------------"
+
+    if ! mkdir -p "$BACKUP_DIR"; then
+        ask_continue_on_error "Failed to create backup directory at ${BACKUP_DIR}"
+        return
+    fi
+
+    local backup_file="${BACKUP_DIR}/${CHECKMK_SITE}_$(date +%Y%m%d_%H%M%S).omd.gz"
+    local site_size_kb available_kb
+
+    site_size_kb=$(du -sk "$CHECKMK_DIR" 2>>"$DEBUG_LOG_FILE" | awk '{print $1}')
+    available_kb=$(df --output=avail "$BACKUP_DIR" | tail -n 1)
+
+    debug_log "Estimated site size: ${site_size_kb:-unknown} KB"
+    debug_log "Available space in backup target: ${available_kb:-unknown} KB"
+
+    if [[ -n "$site_size_kb" && -n "$available_kb" ]] && (( available_kb < site_size_kb * 2 )); then
+        ask_continue_on_error "Potentially insufficient space for backup in ${BACKUP_DIR}. Required (approx): $((site_size_kb * 2)) KB, available: ${available_kb} KB"
+    fi
+
+    echo -e "${TEXT_YELLOW}Creating backup for site ${CHECKMK_SITE}...${TEXT_RESET}"
+    omd backup "$CHECKMK_SITE" "$backup_file" &>> "$DEBUG_LOG_FILE"
+    BACKUP_EXIT=$?
+    debug_log "omd backup -> Exit code: ${BACKUP_EXIT}; File: ${backup_file}"
+
+    if [ $BACKUP_EXIT -ne 0 ]; then
+        ask_continue_on_error "Backup failed for ${CHECKMK_SITE} (exit code: ${BACKUP_EXIT}). See ${DEBUG_LOG_FILE} for details."
+    else
+        echo -e "${TEXT_GREEN}Backup created at ${backup_file}${TEXT_RESET}"
+        debug_log "Backup successfully created at ${backup_file}"
+    fi
 }
 
 check_for_new_script_version() {
@@ -159,6 +206,8 @@ check_and_install_packages() {
     fi
 }
 
+trap final_cleanup EXIT
+
 
 debug_log "---------------------------------"
 debug_log "Script start"
@@ -180,13 +229,19 @@ if (( EUID != 0 )); then
     exit 1
 fi
 
+ensure_omd_available
+
 check_and_install_packages
 
 debug_log "--------------------------------------------------"
 debug_log "Fetching available Checkmk sites via 'omd sites'..."
 debug_log "--------------------------------------------------"
 
-OMD_SITES_RAW=$(omd sites 2>&1)
+if ! OMD_SITES_RAW=$(omd sites 2>&1); then
+    ask_continue_on_error "Failed to query Checkmk sites (omd sites)"
+    exit 1
+fi
+
 debug_log "Raw output from 'omd sites':"
 debug_log "$OMD_SITES_RAW"
 
@@ -266,7 +321,9 @@ LATEST_VERSION=$(grep -oP '(?<=check-mk-raw-)[0-9]+\.[0-9]+\.[0-9]+(?:p[0-9]+)?'
 debug_log "Latest detected version: ${LATEST_VERSION}"
 
 if [ -z "$LATEST_VERSION" ]; then
-    ask_continue_on_error "Could not determine the latest Checkmk version."
+    echo -e "${TEXT_RED}Could not determine the latest Checkmk version. Aborting.${TEXT_RESET}"
+    debug_log "Latest version detection failed; aborting run."
+    exit 1
 fi
 
 echo -e "${TEXT_YELLOW}Installed version: ${TEXT_GREEN}${INSTALLED_VERSION}${TEXT_RESET}"
@@ -279,6 +336,8 @@ if [ "$INSTALLED_VERSION" == "$LATEST_VERSION.cre" ]; then
     final_cleanup
     exit 0
 fi
+
+create_site_backup
 
 debug_log "---------------------------------"
 debug_log "Downloading update"
@@ -295,7 +354,7 @@ WGET_EXIT=$?
 debug_log "wget download -> Exit code: ${WGET_EXIT}"
 
 
-if [ $WGET_EXIT -ne 0 ]; then
+if [ $WGET_EXIT -ne 0 ] || [ ! -s "${TMP_DIR}/${UPDATE_PACKAGE}" ]; then
     ask_continue_on_error "Error downloading the update package (wget exit code: ${WGET_EXIT})"
 else
     debug_log "Download successful. File: ${TMP_DIR}/${UPDATE_PACKAGE}"
@@ -387,5 +446,5 @@ debug_log "---------------------------------"
 echo -e "${TEXT_GREEN}Update completed and cleanup done!${TEXT_RESET}"
 debug_log "Update completed."
 
-final_cleanup
+echo -e "${TEXT_BLUE}Debug log remains at: ${DEBUG_LOG_FILE}${TEXT_RESET}"
 exit 0
