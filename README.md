@@ -1,10 +1,10 @@
 # Checkmk Update Script
 
-A single Bash script that automates Checkmk Raw Edition updates on Debian/Ubuntu. It handles dependency checks, site backup with live progress, package download with SHA256 verification, installation, and post-update verification -- all in one command.
+A single Bash script that automates Checkmk Raw Edition updates on Debian/Ubuntu. It handles dependency checks, site backup with live progress, package download, installation, and post-update verification -- all in one command.
 
 ```
   ╔══════════════════════════════════════════╗
-  ║      Checkmk Update Script v1.3.0        ║
+  ║      Checkmk Update Script v1.4.0        ║
   ╚══════════════════════════════════════════╝
 ```
 
@@ -13,9 +13,9 @@ A single Bash script that automates Checkmk Raw Edition updates on Debian/Ubuntu
 ## Features
 
 - **7-phase guided workflow** -- Prerequisites, script update check, site detection, backup, download, install, and verification with numbered phase headers.
-- **SHA256 checksum verification** of every downloaded package.
 - **Secure temp directory** (`mktemp -d` with `chmod 700`) instead of a predictable path.
 - **HTTPS enforcement** (`--proto =https`) on all outgoing requests.
+- **Pre-flight safety checks** -- detects APT/DPKG locks, warns about broken `dpkg` state, validates the download URL, and checks temp/backup free space before stopping the site.
 - **Live backup progress** showing compressed archive growth, percentage, and elapsed time.
 - **Spinner animations** for long-running operations (dpkg install, omd stop/start).
 - **Pre-update confirmation summary** showing site, versions, and backup location before committing.
@@ -24,6 +24,9 @@ A single Bash script that automates Checkmk Raw Edition updates on Debian/Ubuntu
 - **`NO_COLOR` support** -- all color output respects the `NO_COLOR` environment variable and non-interactive terminals.
 - **Self-update with shebang validation** -- checks GitHub releases and validates downloaded scripts before replacing.
 - **Edition-aware version comparison** -- correctly strips `.cre`/`.cee` suffixes for accurate comparisons.
+- **Interactive UI by default** -- built-in terminal TUI (box drawing + progress widgets), with `--no-ui` fallback to plain prompts.
+- **Dry-run mode** -- downloads the target package, without modifying the system.
+- **Preserves initial site state** -- if the site was stopped before the run, it stays stopped and the script asks whether to start it at the end.
 
 ---
 
@@ -32,9 +35,9 @@ A single Bash script that automates Checkmk Raw Edition updates on Debian/Ubuntu
 | Requirement | Details |
 |---|---|
 | **OS** | Debian or Ubuntu |
-| **Privileges** | Root (the script checks at startup) |
+| **Privileges** | Root for a real update. `--self-test` and `--dry-run` do not require root. |
 | **Checkmk** | Raw Edition site managed by `omd` |
-| **Commands** | `omd`, `lsb_release`, `wget`, `curl`, `dpkg`, `awk`, `grep`, `df`, `sort`, `sha256sum` |
+| **Commands** | `omd`, `lsb_release`, `curl`, `dpkg`, `awk`, `grep`, `df`, `sort`, `sed`, `find` |
 | **Disk space** | At least 2 GB free on `/opt/omd/` plus enough space in `/var/backups/checkmk` for the backup |
 
 Missing packages (except `omd`) are installed automatically via `apt-get` during the prerequisites phase.
@@ -54,7 +57,7 @@ chmod +x cmkupdate.sh
 ## Usage
 
 ```
-cmkupdate - Checkmk Raw Edition update helper (v1.3.0)
+cmkupdate - Checkmk Raw Edition update helper (v1.4.0)
 
 Usage:
   ./cmkupdate.sh [options]
@@ -62,7 +65,10 @@ Usage:
 Options:
   -h, --help        Show help text and exit
   -t, --self-test   Run dependency and syntax check without performing updates
+  -d, --dry-run     Run checks and download package, but do NOT stop site, backup, install, or update
+  -b, --no-backup   Skip the site backup (NOT recommended)
   -y, --yes         Skip interactive confirmations (for automation/CI)
+  --no-ui           Disable the interactive UI for this run
 ```
 
 ### Interactive update (recommended)
@@ -71,7 +77,13 @@ Options:
 sudo ./cmkupdate.sh
 ```
 
-The script walks through all 7 phases, pausing for confirmation before the update begins.
+The script opens a TUI by default and walks through all 7 phases, pausing for confirmation before the update begins.
+
+Disable the UI for one run:
+
+```bash
+sudo ./cmkupdate.sh --no-ui
+```
 
 ### Non-interactive / CI mode
 
@@ -81,6 +93,12 @@ sudo ./cmkupdate.sh --yes
 
 Skips all confirmation prompts. Use with caution -- the script will proceed through backup, download, install, and site restart without asking.
 
+The script runs `omd update` with flags to avoid interactive prompts:
+
+```bash
+omd --force -V "<LATEST_VERSION>.cre" update --conflict=install "<SITE>"
+```
+
 ### Self-test
 
 ```bash
@@ -88,6 +106,22 @@ Skips all confirmation prompts. Use with caution -- the script will proceed thro
 ```
 
 Validates script syntax and checks that all required commands are available. Does not modify anything on the system. Does not require root.
+
+### Dry-run (no changes)
+
+```bash
+./cmkupdate.sh --dry-run
+```
+
+Runs all checks and downloads the target package, but does not stop the site, create a backup, install, or update.
+
+### Skip backup (NOT recommended)
+
+```bash
+sudo ./cmkupdate.sh --no-backup
+```
+
+Runs a normal update, but skips creating an `omd backup`. If the update fails, you may not be able to roll back.
 
 ---
 
@@ -100,7 +134,7 @@ The script runs through 7 numbered phases with semantic output prefixes (`[OK]`,
 [OK]      All dependencies satisfied.
 
 ==> [2/7] Checking for updates
-[OK]      Script is up to date (1.3.0).
+[OK]      Script is up to date (1.4.0).
 
 ==> [3/7] Detecting Checkmk site
 [OK]      Disk space: 18432 MB available.
@@ -120,7 +154,8 @@ The script runs through 7 numbered phases with semantic output prefixes (`[OK]`,
 [OK]      Backup created: /var/backups/checkmk/mysite_20250601_140000.omd.gz (312 MB)
 
 ==> [5/7] Downloading update
-[OK]      SHA256 checksum verified.
+[OK]      Download complete: 135 MB
+[WARN]    Checksum verification disabled.
 
 ==> [6/7] Installing update
 [OK]      Package installed.
@@ -196,11 +231,13 @@ tail -f /tmp/cmkupdate.*/checkmk_update_debug.log
 
 ---
 
-## What's New in v1.3.0
+## Release Notes
+
+See `RELEASE_NOTES.md`.
 
 ### Security
 
-- SHA256 checksum verification of downloaded `.deb` packages.
+- No checksum verification of downloaded `.deb` packages (download via HTTPS only).
 - Secure temp directory via `mktemp -d` with restricted permissions (`chmod 700`).
 - HTTPS enforcement (`--proto =https`) on all `curl` calls.
 - Shebang validation on self-update downloads.
