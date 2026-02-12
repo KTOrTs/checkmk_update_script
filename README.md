@@ -54,7 +54,7 @@ chmod +x cmkupdate.sh
 ## Usage
 
 ```
-cmkupdate - Checkmk Raw Edition update helper (v2.0.0)
+cmkupdate - Checkmk Raw Edition update helper (v1.3.0)
 
 Usage:
   ./cmkupdate.sh [options]
@@ -100,7 +100,7 @@ The script runs through 7 numbered phases with semantic output prefixes (`[OK]`,
 [OK]      All dependencies satisfied.
 
 ==> [2/7] Checking for updates
-[OK]      Script is up to date (2.0.0).
+[OK]      Script is up to date (1.3.0).
 
 ==> [3/7] Detecting Checkmk site
 [OK]      Disk space: 18432 MB available.
@@ -196,7 +196,7 @@ tail -f /tmp/cmkupdate.*/checkmk_update_debug.log
 
 ---
 
-## What's New in v2.0.0
+## What's New in v1.3.0
 
 ### Security
 
