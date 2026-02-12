@@ -134,10 +134,6 @@ omd start <SITE_NAME>
 - If you hit APT/DPKG lock errors: wait for `unattended-upgrades` / `apt` to finish and re-run.
 - If `dpkg --audit` reports issues: fix with `sudo dpkg --configure -a` and `sudo apt-get -f install` before retrying.
 
-## Security Notes
-
-- Downloads are HTTPS-only, but **no checksum verification** of the downloaded `.deb` is performed.
-
 ## Self-Update Notes
 
 - Self-update checks GitHub **Releases** (`/releases/latest`).
