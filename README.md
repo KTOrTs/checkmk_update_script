@@ -137,7 +137,6 @@ omd start <SITE_NAME>
 ## Self-Update Notes
 
 - Self-update checks GitHub **Releases** (`/releases/latest`).
-- Your release tags can be like `1.4.0` (no leading `v`). The script uses the release tag to download `cmkupdate.sh` from that tag.
 
 ## Release Notes
 
