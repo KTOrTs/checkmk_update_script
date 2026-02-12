@@ -3,43 +3,189 @@
 #######################################
 # Checkmk Update Script
 # GitHub: https://github.com/KTOrTs/checkmk_update_script
-# Version: 1.2.5
+# Version: 1.3.0
 #######################################
 
-TMP_DIR="/tmp/cmkupdate"
-mkdir -p "$TMP_DIR"
+set -uo pipefail
 
-DEBUG=1
-DEBUG_LOG_FILE="${TMP_DIR}/checkmk_update_debug.log"
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_UPDATE_TIMEOUT=15
+readonly BACKUP_DIR="/var/backups/checkmk"
+readonly GITHUB_REPO="KTOrTs/checkmk_update_script"
+readonly RAW_SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/cmkupdate.sh"
+readonly GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+readonly REQUIRED_SPACE_MB=2048
 
-TEXT_RESET='\e[0m'
-TEXT_YELLOW='\e[0;33m'
-TEXT_GREEN='\e[0;32m'
-TEXT_RED='\e[0;31m'
-TEXT_BLUE='\e[0;34m'
-
-SCRIPT_VERSION="1.2.5"
-
-SCRIPT_UPDATE_TIMEOUT=15
-
-BACKUP_DIR="/var/backups/checkmk"
-
+# ---------------------------------------------------------------------------
+# Runtime state
+# ---------------------------------------------------------------------------
 SELF_TEST=0
+AUTO_YES=0
+SITE_WAS_STOPPED=0
+CHECKMK_SITE=""
+CHECKMK_DIR=""
+INSTALLED_VERSION=""
+LATEST_VERSION=""
+TOTAL_PHASES=7
+CURRENT_PHASE=0
+BACKUP_FILE_PATH=""
+DOWNLOAD_PACKAGE_PATH=""
+START_SECONDS=$SECONDS
 
-GITHUB_REPO="KTOrTs/checkmk_update_script"
-RAW_SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/checkmk_update.sh"
-GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+# ---------------------------------------------------------------------------
+# Secure temp directory (unpredictable, restricted permissions)
+# ---------------------------------------------------------------------------
+TMP_DIR=$(mktemp -d /tmp/cmkupdate.XXXXXXXXXX)
+chmod 700 "$TMP_DIR"
+DEBUG_LOG_FILE="${TMP_DIR}/checkmk_update_debug.log"
+touch "$DEBUG_LOG_FILE"
+chmod 600 "$DEBUG_LOG_FILE"
 
+# ---------------------------------------------------------------------------
+# Color / formatting (respects NO_COLOR and non-terminal output)
+# ---------------------------------------------------------------------------
+setup_colors() {
+    if [[ -n "${NO_COLOR:-}" ]] || [[ ! -t 1 ]]; then
+        TEXT_RESET=''
+        TEXT_YELLOW=''
+        TEXT_GREEN=''
+        TEXT_RED=''
+        TEXT_CYAN=''
+        TEXT_BOLD=''
+        TEXT_DIM=''
+    else
+        TEXT_RESET='\e[0m'
+        TEXT_YELLOW='\e[0;33m'
+        TEXT_GREEN='\e[0;32m'
+        TEXT_RED='\e[0;31m'
+        TEXT_CYAN='\e[0;96m'
+        TEXT_BOLD='\e[1m'
+        TEXT_DIM='\e[2m'
+    fi
+}
+setup_colors
+
+# ---------------------------------------------------------------------------
+# Output helpers with semantic prefixes
+# ---------------------------------------------------------------------------
+msg_info()    { echo -e "${TEXT_CYAN}[INFO]${TEXT_RESET}    $*"; }
+msg_ok()      { echo -e "${TEXT_GREEN}[OK]${TEXT_RESET}      $*"; }
+msg_warn()    { echo -e "${TEXT_YELLOW}[WARN]${TEXT_RESET}    $*"; }
+msg_error()   { echo -e "${TEXT_RED}[ERROR]${TEXT_RESET}   $*"; }
+msg_phase()   {
+    CURRENT_PHASE=$((CURRENT_PHASE + 1))
+    echo ""
+    echo -e "${TEXT_BOLD}==> [${CURRENT_PHASE}/${TOTAL_PHASES}] $*${TEXT_RESET}"
+}
+
+# ---------------------------------------------------------------------------
+# Debug logging
+# ---------------------------------------------------------------------------
+debug_log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [DEBUG] $1" >> "$DEBUG_LOG_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# Spinner for background operations
+# ---------------------------------------------------------------------------
+spinner() {
+    local pid=$1
+    local label="${2:-Working...}"
+    local spin_chars='|/-\'
+    local i=0
+
+    # Only show spinner on interactive terminals
+    if [[ ! -t 1 ]]; then
+        wait "$pid"
+        return $?
+    fi
+
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r${TEXT_DIM}  %s %s${TEXT_RESET}" "${spin_chars:i++%4:1}" "$label"
+        sleep 0.3
+    done
+    printf "\r\033[K"
+    wait "$pid"
+    return $?
+}
+
+# ---------------------------------------------------------------------------
+# Error handling
+# ---------------------------------------------------------------------------
+ask_continue_on_error() {
+    local error_msg="$1"
+    local context="${2:-Continuing may lead to unexpected behavior.}"
+    msg_error "$error_msg"
+    msg_info "$context"
+    msg_info "Debug log: ${DEBUG_LOG_FILE}"
+
+    if (( AUTO_YES )); then
+        debug_log "Auto-yes: continuing after error: ${error_msg}"
+        return 0
+    fi
+
+    while true; do
+        read -rp "Do you want to continue? [y/N]: " user_input
+        case "${user_input:-N}" in
+            [Yy]) debug_log "User chose to continue after: ${error_msg}"; return 0 ;;
+            [Nn]|"") debug_log "User aborted after: ${error_msg}"; echo -e "${TEXT_RED}Aborted.${TEXT_RESET}"; exit 1 ;;
+            *) echo "Please enter 'y' or 'n'." ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Cleanup and trap handling
+# ---------------------------------------------------------------------------
+final_cleanup() {
+    local exit_code=$?
+
+    # Restart the site if we stopped it and it is still down
+    if (( SITE_WAS_STOPPED )) && [[ -n "$CHECKMK_SITE" ]]; then
+        if ! omd status "$CHECKMK_SITE" &>/dev/null; then
+            msg_warn "Restarting site ${CHECKMK_SITE} (was stopped during update)..."
+            omd start "$CHECKMK_SITE" &>> "$DEBUG_LOG_FILE" || true
+        fi
+    fi
+
+    # Remove temp files but preserve the debug log
+    if [[ -d "$TMP_DIR" ]]; then
+        find "$TMP_DIR" -mindepth 1 -maxdepth 1 ! -name "$(basename "$DEBUG_LOG_FILE")" -exec rm -rf {} + 2>/dev/null || true
+    fi
+
+    debug_log "Script exiting with code ${exit_code}."
+    return 0
+}
+trap final_cleanup EXIT
+
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
 print_usage() {
     cat <<EOF
-Usage: $0 [options]
+${TEXT_BOLD}cmkupdate${TEXT_RESET} - Checkmk Raw Edition update helper (v${SCRIPT_VERSION})
 
-Options:
-  -h, --help        Show this help text and exit.
-  -t, --self-test   Run a fast dependency and syntax check without performing updates.
+${TEXT_BOLD}Usage:${TEXT_RESET}
+  $0 [options]
+
+${TEXT_BOLD}Options:${TEXT_RESET}
+  -h, --help        Show this help text and exit
+  -t, --self-test   Run dependency and syntax check without performing updates
+  -y, --yes         Skip interactive confirmations (use with caution)
+
+${TEXT_BOLD}Examples:${TEXT_RESET}
+  sudo $0              Run an interactive update
+  sudo $0 --yes        Run an update without confirmation prompts
+  $0 --self-test       Verify dependencies are installed
 EOF
 }
 
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -50,8 +196,11 @@ parse_args() {
             -t|--self-test)
                 SELF_TEST=1
                 ;;
+            -y|--yes)
+                AUTO_YES=1
+                ;;
             *)
-                echo -e "${TEXT_RED}Unknown option: $1${TEXT_RESET}" >&2
+                msg_error "Unknown option: $1"
                 print_usage
                 exit 1
                 ;;
@@ -60,18 +209,17 @@ parse_args() {
     done
 }
 
+# ---------------------------------------------------------------------------
+# Self-test mode
+# ---------------------------------------------------------------------------
 run_self_test() {
-    debug_log "---------------------------------"
     debug_log "Running self-test"
-    debug_log "---------------------------------"
-
-    echo -e "${TEXT_YELLOW}Running self-test (syntax and dependency check)...${TEXT_RESET}" 
+    msg_info "Running self-test (syntax and dependency check)..."
 
     if bash -n "$0"; then
-        debug_log "Syntax check passed."
+        msg_ok "Syntax check passed."
     else
-        debug_log "Syntax check failed."
-        echo -e "${TEXT_RED}Syntax check failed. See ${DEBUG_LOG_FILE} for details.${TEXT_RESET}" 
+        msg_error "Syntax check failed. See ${DEBUG_LOG_FILE} for details."
         exit 1
     fi
 
@@ -79,502 +227,668 @@ run_self_test() {
     local missing=()
 
     for cmd in "${required[@]}"; do
-        if ! command -v "$cmd" &> /dev/null; then
+        if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
     done
 
-    if [ ${#missing[@]} -gt 0 ]; then
-        echo -e "${TEXT_RED}Missing required commands: ${missing[*]}${TEXT_RESET}" 
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        msg_error "Missing required commands: ${missing[*]}"
         debug_log "Self-test failed. Missing: ${missing[*]}"
         exit 1
     fi
 
+    msg_ok "Self-test succeeded. All required commands are available."
     debug_log "Self-test completed successfully."
-    echo -e "${TEXT_GREEN}Self-test succeeded. All required commands are available.${TEXT_RESET}" 
     exit 0
 }
 
-
-debug_log() {
-    local message="[DEBUG] $1"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') ${message}" >> "$DEBUG_LOG_FILE"
+# ---------------------------------------------------------------------------
+# Version comparison helper
+# ---------------------------------------------------------------------------
+version_gt() {
+    [[ $# -eq 2 ]] || return 1
+    [[ "$(printf '%s\n' "$1" "$2" | sort -V | head -n 1)" != "$1" ]]
 }
 
-ask_continue_on_error() {
-    local error_msg="$1"
-    echo -e "${TEXT_RED}${error_msg}${TEXT_RESET}"
-    debug_log "${error_msg}"
-    echo -e "${TEXT_RED}Debug log remains available at: ${DEBUG_LOG_FILE}${TEXT_RESET}"
-    while true; do
-        read -rp "Do you want to continue the script? [y/n]: " user_input
-        case "$user_input" in
-            [Yy]) debug_log "User chose to continue the script."; break ;;
-            [Nn]) debug_log "User aborted the script."; echo -e "${TEXT_RED}Script will be terminated.${TEXT_RESET}"; exit 1 ;;
-            *) echo "Please enter 'y' for Yes or 'n' for No." ;;
-        esac
-    done
+# Strip edition suffix (.cre, .cee, .cce, .cme) from a version string
+strip_edition() {
+    echo "$1" | sed -E 's/\.(cre|cee|cce|cme)$//'
 }
 
-final_cleanup() {
-    debug_log "Final cleanup triggered for ${TMP_DIR} (preserving debug log)."
-    find "$TMP_DIR" -mindepth 1 -maxdepth 1 ! -name "$(basename "$DEBUG_LOG_FILE")" -exec rm -rf {} +
-}
-
+# ---------------------------------------------------------------------------
+# Ensure omd is available
+# ---------------------------------------------------------------------------
 ensure_omd_available() {
-    if ! command -v omd &> /dev/null; then
-        local error_msg="The 'omd' command is not available. Please install Checkmk before running this script."
-        echo -e "${TEXT_RED}${error_msg}${TEXT_RESET}"
-        debug_log "$error_msg"
+    if ! command -v omd &>/dev/null; then
+        msg_error "The 'omd' command is not available."
+        msg_info "Please install Checkmk before running this script."
+        debug_log "omd not found."
         exit 1
     fi
 }
 
-version_gt() {
-    test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"
-}
+# ---------------------------------------------------------------------------
+# Check and install missing packages
+# ---------------------------------------------------------------------------
+check_and_install_packages() {
+    debug_log "Checking required packages..."
 
-create_site_backup() {
-    debug_log "---------------------------------"
-    debug_log "Creating site backup"
-    debug_log "---------------------------------"
+    local required_cmds=("lsb_release" "wget" "curl" "dpkg" "awk" "grep" "df" "sort")
+    local missing_packages=()
 
-    if ! mkdir -p "$BACKUP_DIR"; then
-        ask_continue_on_error "Failed to create backup directory at ${BACKUP_DIR}"
-        return
-    fi
-
-    local backup_file="${BACKUP_DIR}/${CHECKMK_SITE}_$(date +%Y%m%d_%H%M%S).omd.gz"
-    local site_size_kb available_kb site_size_mb_display
-
-    site_size_kb=$(du -sk "$CHECKMK_DIR" 2>>"$DEBUG_LOG_FILE" | awk '{print $1}')
-    available_kb=$(df --output=avail "$BACKUP_DIR" | tail -n 1)
-
-    if [[ -n "$site_size_kb" ]]; then
-        site_size_mb_display=$(awk -v kb="$site_size_kb" 'BEGIN { printf "%.2f", kb/1024 }')
-    else
-        site_size_mb_display="unknown"
-    fi
-
-    debug_log "Estimated site size (du -sk ${CHECKMK_DIR}): ${site_size_kb:-unknown} KB"
-    debug_log "Available space in backup target: ${available_kb:-unknown} KB"
-
-    echo -e "${TEXT_YELLOW}Estimated site size (du -sk ${CHECKMK_DIR}): ${site_size_mb_display} MB${TEXT_RESET}"
-
-    if [[ -n "$site_size_kb" && -n "$available_kb" ]] && (( available_kb < site_size_kb * 2 )); then
-        ask_continue_on_error "Potentially insufficient space for backup in ${BACKUP_DIR}. Required (approx): $((site_size_kb * 2)) KB, available: ${available_kb} KB"
-    fi
-
-    echo -e "${TEXT_YELLOW}Creating backup for site ${CHECKMK_SITE}...${TEXT_RESET}"
-    omd backup "$CHECKMK_SITE" "$backup_file" &>> "$DEBUG_LOG_FILE" &
-    BACKUP_PID=$!
-
-    while kill -0 "$BACKUP_PID" 2>/dev/null; do
-        local current_bytes current_mb
-
-        if [ -f "$backup_file" ]; then
-            current_bytes=$(stat -c%s "$backup_file" 2>/dev/null || echo 0)
-            current_mb=$(awk -v bytes="$current_bytes" 'BEGIN { printf "%.2f", bytes/1048576 }')
-        else
-            current_mb="0.00"
+    for cmd in "${required_cmds[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            debug_log "Missing command: $cmd"
+            case "$cmd" in
+                lsb_release) missing_packages+=("lsb-release") ;;
+                wget)        missing_packages+=("wget") ;;
+                curl)        missing_packages+=("curl") ;;
+                dpkg)        missing_packages+=("dpkg") ;;
+                awk)         missing_packages+=("gawk") ;;
+                grep)        missing_packages+=("grep") ;;
+                df|sort)     missing_packages+=("coreutils") ;;
+            esac
         fi
-
-        printf "\r${TEXT_BLUE}Backup progress: estimated %s MB | current %s MB${TEXT_RESET}" "${site_size_mb_display}" "${current_mb}"
-        sleep 2
     done
 
-    wait "$BACKUP_PID"
-    BACKUP_EXIT=$?
-    echo
-    debug_log "omd backup -> Exit code: ${BACKUP_EXIT}; File: ${backup_file}"
-
-    if [ $BACKUP_EXIT -ne 0 ]; then
-        ask_continue_on_error "Backup failed for ${CHECKMK_SITE} (exit code: ${BACKUP_EXIT}). See ${DEBUG_LOG_FILE} for details."
-    else
-        echo -e "${TEXT_GREEN}Backup created at ${backup_file}${TEXT_RESET}"
-        if [ -f "$backup_file" ]; then
-            local final_bytes final_mb
-            final_bytes=$(stat -c%s "$backup_file" 2>/dev/null || echo 0)
-            final_mb=$(awk -v bytes="$final_bytes" 'BEGIN { printf "%.2f", bytes/1048576 }')
-            debug_log "Backup size on disk: ${final_bytes} bytes (${final_mb} MB)"
+    if [[ ${#missing_packages[@]} -gt 0 ]]; then
+        msg_info "Installing missing packages: ${missing_packages[*]}"
+        apt-get update -qq &>> "$DEBUG_LOG_FILE"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing_packages[@]}" &>> "$DEBUG_LOG_FILE"
+        local apt_exit=$?
+        debug_log "apt-get install ${missing_packages[*]} -> Exit code: ${apt_exit}"
+        if [[ $apt_exit -ne 0 ]]; then
+            ask_continue_on_error \
+                "Failed to install required packages (exit code: ${apt_exit})." \
+                "Try running 'apt-get update && apt-get install ${missing_packages[*]}' manually."
+        else
+            msg_ok "Packages installed."
         fi
-        debug_log "Backup successfully created at ${backup_file}"
-        debug_log "Restore hint: omd restore ${CHECKMK_SITE} ${backup_file}"
-        echo -e "${TEXT_BLUE}To restore this backup later, run: omd restore ${CHECKMK_SITE} ${backup_file}${TEXT_RESET}"
+    else
+        msg_ok "All dependencies satisfied."
+        debug_log "All required packages present."
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Check for new script version on GitHub
+# ---------------------------------------------------------------------------
 check_for_new_script_version() {
-    echo -e "${TEXT_YELLOW}Checking for a new script version...${TEXT_RESET}"
-    debug_log "Checking GitHub API for the latest release."
+    msg_info "Checking for script updates..."
+    debug_log "Querying GitHub API for latest release."
 
-    API_RESPONSE=$(curl -s --fail --max-time "$SCRIPT_UPDATE_TIMEOUT" "$GITHUB_API_URL" 2>>"$DEBUG_LOG_FILE")
-    CURL_EXIT=$?
-    debug_log "GitHub API curl exit code: ${CURL_EXIT} (timeout: ${SCRIPT_UPDATE_TIMEOUT}s)"
+    local api_response curl_exit
+    api_response=$(curl -s --fail --proto =https --max-time "$SCRIPT_UPDATE_TIMEOUT" "$GITHUB_API_URL" 2>>"$DEBUG_LOG_FILE") || true
+    curl_exit=$?
+    debug_log "GitHub API curl exit code: ${curl_exit}"
 
-    if [ $CURL_EXIT -ne 0 ] || [[ "$API_RESPONSE" == *"API rate limit exceeded"* ]]; then
-        if [ $CURL_EXIT -eq 28 ]; then
-            debug_log "GitHub API request timed out after ${SCRIPT_UPDATE_TIMEOUT} seconds."
-            echo -e "${TEXT_YELLOW}GitHub update check timed out after ${SCRIPT_UPDATE_TIMEOUT}s.${TEXT_RESET}"
+    if [[ $curl_exit -ne 0 ]] || [[ "$api_response" == *"API rate limit exceeded"* ]]; then
+        if [[ $curl_exit -eq 28 ]]; then
+            msg_warn "Script update check timed out after ${SCRIPT_UPDATE_TIMEOUT}s."
         else
-            debug_log "GitHub API request failed or rate limit exceeded."
-            echo -e "${TEXT_YELLOW}Could not check for updates (API limit or connection issue).${TEXT_RESET}"
+            msg_warn "Could not check for script updates (API limit or connection issue)."
         fi
         return
     fi
 
-    LATEST_SCRIPT_VERSION=$(echo "$API_RESPONSE" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    local latest_script_version
+    latest_script_version=$(echo "$api_response" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
-    if [ -z "$LATEST_SCRIPT_VERSION" ]; then
-        debug_log "Failed to extract latest version from API response."
-        echo -e "${TEXT_YELLOW}Could not determine latest version.${TEXT_RESET}"
+    if [[ -z "$latest_script_version" ]]; then
+        msg_warn "Could not determine latest script version."
+        debug_log "Failed to extract version from API response."
         return
     fi
 
-    debug_log "Current script version: ${SCRIPT_VERSION}"
-    debug_log "Latest script version on GitHub: ${LATEST_SCRIPT_VERSION}"
+    debug_log "Current: ${SCRIPT_VERSION}, Latest: ${latest_script_version}"
 
+    if version_gt "$latest_script_version" "$SCRIPT_VERSION"; then
+        msg_info "New script version available: ${SCRIPT_VERSION} -> ${latest_script_version}"
 
+        if (( AUTO_YES )); then
+            debug_log "Auto-yes: skipping self-update."
+            return
+        fi
 
-    if version_gt "$LATEST_SCRIPT_VERSION" "$SCRIPT_VERSION"; then
-        echo -e "${TEXT_GREEN}A new script version (${LATEST_SCRIPT_VERSION}) is available!${TEXT_RESET}"
         while true; do
-            read -rp "Do you want to download and replace this script with the latest version? [y/n]: " update_choice
-            case "$update_choice" in
+            read -rp "Download and update the script? [y/N]: " update_choice
+            case "${update_choice:-N}" in
                 [Yy])
-                    debug_log "User chose to update the script to ${LATEST_SCRIPT_VERSION}."
-                    echo -e "${TEXT_YELLOW}Downloading the latest script...${TEXT_RESET}"
-                    curl -s --max-time "$SCRIPT_UPDATE_TIMEOUT" -o "$0.new" "$RAW_SCRIPT_URL" 2>>"$DEBUG_LOG_FILE"
-                    CURL_EXIT=$?
-                    if [ $CURL_EXIT -ne 0 ]; then
-                        echo -e "${TEXT_RED}Failed to download the new script version.${TEXT_RESET}"
-                        debug_log "Failed to download the new script version (curl exit code: ${CURL_EXIT})"
+                    debug_log "User chose to update script to ${latest_script_version}."
+                    msg_info "Downloading new version..."
+                    local new_script="${TMP_DIR}/cmkupdate.sh.new"
+                    if ! curl --fail --proto =https --max-time "$SCRIPT_UPDATE_TIMEOUT" -o "$new_script" "$RAW_SCRIPT_URL" 2>>"$DEBUG_LOG_FILE"; then
+                        msg_error "Failed to download the new script version."
+                        debug_log "Self-update download failed."
                         return
                     fi
-                    mv "$0.new" "$0"
-                    chmod +x "$0"
-                    echo -e "${TEXT_GREEN}Script updated to version ${LATEST_SCRIPT_VERSION}. Please re-run the script.${TEXT_RESET}"
-                    debug_log "Script successfully updated to ${LATEST_SCRIPT_VERSION}. Exiting for re-run."
+                    # Basic validation: must start with a shebang
+                    if ! head -c 2 "$new_script" | grep -q '#!'; then
+                        msg_error "Downloaded file does not look like a valid script. Aborting update."
+                        debug_log "Self-update validation failed (no shebang)."
+                        rm -f "$new_script"
+                        return
+                    fi
+                    local script_path
+                    script_path=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+                    cp "$new_script" "$script_path"
+                    chmod +x "$script_path"
+                    rm -f "$new_script"
+                    msg_ok "Script updated to ${latest_script_version}. Please re-run."
+                    debug_log "Self-update successful. Exiting for re-run."
                     exit 0
                     ;;
-                [Nn])
-                    debug_log "User chose not to update the script."
+                [Nn]|"")
+                    debug_log "User declined self-update."
                     break
                     ;;
                 *)
-                    echo "Please enter 'y' for Yes or 'n' for No."
+                    echo "Please enter 'y' or 'n'."
                     ;;
             esac
         done
     else
-        echo -e "${TEXT_GREEN}You are using the latest script version (${SCRIPT_VERSION}).${TEXT_RESET}"
-        debug_log "Script is up to date (${SCRIPT_VERSION})."
+        msg_ok "Script is up to date (${SCRIPT_VERSION})."
     fi
 }
 
-check_and_install_packages() {
-    debug_log "---------------------------------"
-    debug_log "Checking required packages..."
-    debug_log "---------------------------------"
+# ---------------------------------------------------------------------------
+# Create site backup
+# ---------------------------------------------------------------------------
+create_site_backup() {
+    if ! mkdir -p "$BACKUP_DIR"; then
+        ask_continue_on_error \
+            "Failed to create backup directory ${BACKUP_DIR}." \
+            "Continuing means NO backup will be created."
+        return
+    fi
+    chmod 750 "$BACKUP_DIR" 2>/dev/null || true
 
-    REQUIRED_CMDS=("lsb_release" "wget" "curl" "dpkg" "awk" "grep" "df" "sort")
-    MISSING_PACKAGES=()
+    BACKUP_FILE_PATH="${BACKUP_DIR}/${CHECKMK_SITE}_$(date +%Y%m%d_%H%M%S).omd.gz"
+    local site_size_kb available_kb site_size_mb
 
-    for cmd in "${REQUIRED_CMDS[@]}"; do
-        if ! command -v "$cmd" &> /dev/null; then
-            debug_log "Missing command detected: $cmd"
-            case "$cmd" in
-                lsb_release) MISSING_PACKAGES+=("lsb-release") ;;
-                wget)        MISSING_PACKAGES+=("wget") ;;
-                curl)        MISSING_PACKAGES+=("curl") ;;
-                dpkg)        MISSING_PACKAGES+=("dpkg") ;;
-                awk)         MISSING_PACKAGES+=("gawk") ;;
-                grep)        MISSING_PACKAGES+=("grep") ;;
-                df)          MISSING_PACKAGES+=("coreutils") ;;
-                sort)        MISSING_PACKAGES+=("coreutils") ;;
-            esac
-        else
-            debug_log "Command $cmd is available."
-        fi
-    done
+    site_size_kb=$(du -sk "$CHECKMK_DIR" 2>>"$DEBUG_LOG_FILE" | awk '{print $1}')
+    available_kb=$(df --output=avail "$BACKUP_DIR" 2>/dev/null | tail -n 1 | tr -d ' ')
 
-    if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
-        debug_log "The following packages will be installed: ${MISSING_PACKAGES[*]}"
-        apt-get update -qq &>> "$DEBUG_LOG_FILE"
-        APT_UPDATE_EXIT=$?
-        debug_log "apt-get update -> Exit code: ${APT_UPDATE_EXIT}"
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${MISSING_PACKAGES[@]}" &>> "$DEBUG_LOG_FILE"
-        APT_INSTALL_EXIT=$?
-        debug_log "apt-get install ${MISSING_PACKAGES[*]} -> Exit code: ${APT_INSTALL_EXIT}"
-        if [ $APT_INSTALL_EXIT -ne 0 ]; then
-            ask_continue_on_error "Error installing required packages (Exit code: ${APT_INSTALL_EXIT})"
-        else
-            debug_log "All missing packages were successfully installed."
-        fi
+    if [[ -n "$site_size_kb" ]]; then
+        site_size_mb=$(awk -v kb="$site_size_kb" 'BEGIN { printf "%.0f", kb/1024 }')
     else
-        debug_log "All required packages are already installed."
+        site_size_mb="unknown"
+    fi
+
+    debug_log "Site size estimate: ${site_size_kb:-unknown} KB, available: ${available_kb:-unknown} KB"
+    msg_info "Estimated site size: ${site_size_mb} MB (uncompressed)"
+
+    if [[ -n "$site_size_kb" && -n "$available_kb" ]] && (( available_kb < site_size_kb )); then
+        ask_continue_on_error \
+            "Potentially insufficient space for backup in ${BACKUP_DIR}." \
+            "Available: $((available_kb / 1024)) MB, site size: ${site_size_mb} MB. Continuing may result in a partial backup."
+    fi
+
+    msg_info "Creating backup for site ${CHECKMK_SITE}..."
+    omd backup "$CHECKMK_SITE" "$BACKUP_FILE_PATH" &>> "$DEBUG_LOG_FILE" &
+    local backup_pid=$!
+
+    # Progress display
+    local start_time=$SECONDS
+    while kill -0 "$backup_pid" 2>/dev/null; do
+        local current_mb="0" pct="" elapsed
+        elapsed=$(( SECONDS - start_time ))
+
+        if [[ -f "$BACKUP_FILE_PATH" ]]; then
+            local current_bytes
+            current_bytes=$(stat -c%s "$BACKUP_FILE_PATH" 2>/dev/null || echo 0)
+            current_mb=$(( current_bytes / 1048576 ))
+        fi
+
+        if [[ "$site_size_mb" != "unknown" && "$site_size_mb" -gt 0 ]]; then
+            pct=$(( current_mb * 100 / site_size_mb ))
+            # Compression usually yields < 100%, clamp display
+            [[ $pct -gt 99 ]] && pct=99
+            printf "\r\033[K  ${TEXT_DIM}Backup: %s MB / ~%s MB (%s%%) | elapsed %dm %ds${TEXT_RESET}" \
+                "$current_mb" "$site_size_mb" "$pct" $((elapsed/60)) $((elapsed%60))
+        else
+            printf "\r\033[K  ${TEXT_DIM}Backup: %s MB | elapsed %dm %ds${TEXT_RESET}" \
+                "$current_mb" $((elapsed/60)) $((elapsed%60))
+        fi
+        sleep 2
+    done
+    printf "\r\033[K"
+
+    wait "$backup_pid"
+    local backup_exit=$?
+    debug_log "omd backup -> Exit code: ${backup_exit}; File: ${BACKUP_FILE_PATH}"
+
+    if [[ $backup_exit -ne 0 ]]; then
+        BACKUP_FILE_PATH=""
+        ask_continue_on_error \
+            "Backup failed for ${CHECKMK_SITE} (exit code: ${backup_exit})." \
+            "Continuing without a backup means you CANNOT roll back if the update fails."
+    else
+        local final_mb="0"
+        if [[ -f "$BACKUP_FILE_PATH" ]]; then
+            local final_bytes
+            final_bytes=$(stat -c%s "$BACKUP_FILE_PATH" 2>/dev/null || echo 0)
+            final_mb=$(( final_bytes / 1048576 ))
+            chmod 640 "$BACKUP_FILE_PATH" 2>/dev/null || true
+            debug_log "Backup size: ${final_bytes} bytes (${final_mb} MB)"
+        fi
+        msg_ok "Backup created: ${BACKUP_FILE_PATH} (${final_mb} MB)"
+        msg_info "Restore with: omd restore ${CHECKMK_SITE} ${BACKUP_FILE_PATH}"
     fi
 }
 
-trap final_cleanup EXIT
+# ---------------------------------------------------------------------------
+# Detect and select Checkmk site
+# ---------------------------------------------------------------------------
+detect_site() {
+    debug_log "Fetching sites via 'omd sites'..."
+    local omd_sites_raw
+    if ! omd_sites_raw=$(omd sites 2>&1); then
+        msg_error "Failed to query Checkmk sites."
+        msg_info "Ensure Checkmk is installed and 'omd sites' works."
+        debug_log "omd sites failed: ${omd_sites_raw}"
+        exit 1
+    fi
+    debug_log "omd sites output: ${omd_sites_raw}"
 
+    local sites=()
+    mapfile -t sites < <(echo "$omd_sites_raw" | awk '!/^SITE/ && NF {print $1}')
+    debug_log "Detected sites: ${sites[*]:-none}"
 
-debug_log "---------------------------------"
-debug_log "Script start"
-debug_log "---------------------------------"
-echo "Starting update script $(date)" > "$DEBUG_LOG_FILE"
-echo -e "${TEXT_BLUE}Debug log is located at: ${DEBUG_LOG_FILE}${TEXT_RESET}"
-echo -e "${TEXT_BLUE}Monitor with: ${TEXT_GREEN}tail -f ${DEBUG_LOG_FILE}${TEXT_RESET}\n"
-sleep 1
+    if [[ ${#sites[@]} -eq 0 ]]; then
+        msg_error "No Checkmk sites found."
+        debug_log "No sites detected."
+        exit 1
+    fi
 
+    if [[ ${#sites[@]} -eq 1 ]]; then
+        CHECKMK_SITE="${sites[0]}"
+        debug_log "Single site found: ${CHECKMK_SITE}"
+    else
+        msg_info "Multiple Checkmk sites found. Please select one:"
+        select site in "${sites[@]}"; do
+            if [[ -n "$site" ]]; then
+                CHECKMK_SITE="$site"
+                debug_log "User selected site: ${CHECKMK_SITE}"
+                break
+            else
+                echo "Invalid selection. Please enter a valid number."
+            fi
+        done
+    fi
+
+    CHECKMK_DIR="/opt/omd/sites/${CHECKMK_SITE}"
+}
+
+# ---------------------------------------------------------------------------
+# Get installed version for the selected site
+# ---------------------------------------------------------------------------
+get_installed_version() {
+    local raw_version
+    raw_version=$(omd version "$CHECKMK_SITE" 2>/dev/null | awk '{print $NF}')
+    INSTALLED_VERSION=$(strip_edition "$raw_version")
+    debug_log "Installed version for ${CHECKMK_SITE}: ${raw_version} (stripped: ${INSTALLED_VERSION})"
+}
+
+# ---------------------------------------------------------------------------
+# Fetch latest available Checkmk version
+# ---------------------------------------------------------------------------
+fetch_latest_version() {
+    msg_info "Checking latest Checkmk version..."
+    local tmp_file="${TMP_DIR}/checkmk_versions.html"
+
+    if ! curl -sf --proto =https -o "$tmp_file" "https://checkmk.com/download" 2>>"$DEBUG_LOG_FILE"; then
+        ask_continue_on_error \
+            "Failed to fetch Checkmk version information." \
+            "Check your internet connection and try again."
+        return 1
+    fi
+
+    LATEST_VERSION=$(grep -oP '(?<=check-mk-raw-)[0-9]+\.[0-9]+\.[0-9]+(?:p[0-9]+)?' "$tmp_file" | sort -V | tail -n 1)
+    debug_log "Latest version detected: ${LATEST_VERSION:-none}"
+    rm -f "$tmp_file"
+
+    if [[ -z "$LATEST_VERSION" ]]; then
+        msg_error "Could not determine the latest Checkmk version."
+        debug_log "Version detection failed."
+        exit 1
+    fi
+
+    # Validate version format
+    if ! [[ "$LATEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(p[0-9]+)?$ ]]; then
+        msg_error "Detected version '${LATEST_VERSION}' has unexpected format."
+        debug_log "Version format validation failed: ${LATEST_VERSION}"
+        exit 1
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Check disk space
+# ---------------------------------------------------------------------------
+check_disk_space() {
+    local available_kb
+    available_kb=$(df --output=avail /opt/omd/ 2>/dev/null | tail -n 1 | tr -d ' ')
+    debug_log "Available on /opt/omd/: ${available_kb:-unknown} KB, required: ${REQUIRED_SPACE_MB} MB"
+
+    if [[ -n "$available_kb" ]] && (( available_kb < REQUIRED_SPACE_MB * 1024 )); then
+        ask_continue_on_error \
+            "Low disk space on /opt/omd/: $((available_kb / 1024)) MB available, ${REQUIRED_SPACE_MB} MB recommended." \
+            "The update may fail if there is not enough space."
+    else
+        msg_ok "Disk space: $((available_kb / 1024)) MB available."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Download and verify update package
+# ---------------------------------------------------------------------------
+download_update() {
+    local distro arch update_package download_url
+    distro=$(lsb_release -sc)
+    arch=$(dpkg --print-architecture)
+    update_package="check-mk-raw-${LATEST_VERSION}_0.${distro}_${arch}.deb"
+    download_url="https://download.checkmk.com/checkmk/${LATEST_VERSION}/${update_package}"
+
+    debug_log "Package: ${update_package}"
+    debug_log "URL: ${download_url}"
+
+    # Get expected file size
+    local content_length
+    content_length=$(curl -sI --proto =https "$download_url" 2>>"$DEBUG_LOG_FILE" \
+        | awk '/[Cc]ontent-[Ll]ength/ {print $2}' | tr -d '\r')
+
+    if [[ -n "$content_length" ]]; then
+        msg_info "Expected download size: $(( content_length / 1048576 )) MB"
+        debug_log "Expected size: ${content_length} bytes"
+    fi
+
+    msg_info "Downloading ${update_package}..."
+    DOWNLOAD_PACKAGE_PATH="${TMP_DIR}/${update_package}"
+    curl --fail --location --proto =https --progress-bar \
+        -o "$DOWNLOAD_PACKAGE_PATH" "$download_url" 2>&1
+    local curl_exit=$?
+
+    if [[ $curl_exit -ne 0 ]]; then
+        debug_log "Download failed: curl exit code ${curl_exit}"
+        DOWNLOAD_PACKAGE_PATH=""
+        ask_continue_on_error \
+            "Download failed (exit code: ${curl_exit})." \
+            "Check the URL ${download_url} and your internet connection."
+        return 1
+    fi
+
+    if [[ ! -s "$DOWNLOAD_PACKAGE_PATH" ]]; then
+        debug_log "Download produced empty file."
+        DOWNLOAD_PACKAGE_PATH=""
+        ask_continue_on_error \
+            "Download finished but the package file is empty." \
+            "The download server may be experiencing issues."
+        return 1
+    fi
+
+    local downloaded_mb
+    downloaded_mb=$(( $(stat -c%s "$DOWNLOAD_PACKAGE_PATH") / 1048576 ))
+    msg_ok "Download complete: ${downloaded_mb} MB"
+
+    # Attempt SHA256 verification
+    local checksum_url="https://download.checkmk.com/checkmk/${LATEST_VERSION}/${update_package}.sha256"
+    local checksum_file="${TMP_DIR}/${update_package}.sha256"
+
+    if curl -sf --proto =https --max-time 15 -o "$checksum_file" "$checksum_url" 2>>"$DEBUG_LOG_FILE"; then
+        local expected_hash actual_hash
+        expected_hash=$(awk '{print $1}' "$checksum_file")
+        actual_hash=$(sha256sum "$DOWNLOAD_PACKAGE_PATH" | awk '{print $1}')
+        debug_log "Expected SHA256: ${expected_hash}"
+        debug_log "Actual SHA256:   ${actual_hash}"
+
+        if [[ "$expected_hash" == "$actual_hash" ]]; then
+            msg_ok "SHA256 checksum verified."
+        else
+            msg_error "SHA256 checksum mismatch!"
+            msg_info "Expected: ${expected_hash}"
+            msg_info "Got:      ${actual_hash}"
+            ask_continue_on_error \
+                "Package integrity check failed." \
+                "The downloaded file may be corrupted or tampered with. Continuing is NOT recommended."
+        fi
+        rm -f "$checksum_file"
+    else
+        msg_warn "SHA256 checksum not available from server. Skipping verification."
+        debug_log "Checksum file not available at ${checksum_url}"
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Install the .deb package
+# ---------------------------------------------------------------------------
+install_package() {
+    local package_path="$1"
+    msg_info "Installing update package..."
+
+    dpkg -i "$package_path" &>> "$DEBUG_LOG_FILE" &
+    local dpkg_pid=$!
+    spinner "$dpkg_pid" "Installing package..."
+    local dpkg_exit=$?
+
+    debug_log "dpkg -i -> Exit code: ${dpkg_exit}"
+    if [[ $dpkg_exit -ne 0 ]]; then
+        ask_continue_on_error \
+            "Package installation failed (exit code: ${dpkg_exit})." \
+            "Check the debug log for details. You may need to run 'apt-get -f install' to fix dependencies."
+    else
+        msg_ok "Package installed."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Print banner
+# ---------------------------------------------------------------------------
+print_banner() {
+    echo -e "${TEXT_BOLD}"
+    echo "  ╔══════════════════════════════════════════╗"
+    echo "  ║      Checkmk Update Script v${SCRIPT_VERSION}       ║"
+    echo "  ╚══════════════════════════════════════════╝"
+    echo -e "${TEXT_RESET}"
+    msg_info "Debug log: ${DEBUG_LOG_FILE}"
+}
+
+# ---------------------------------------------------------------------------
+# Print pre-update confirmation
+# ---------------------------------------------------------------------------
+confirm_update() {
+    echo ""
+    echo -e "${TEXT_BOLD}  Update Summary${TEXT_RESET}"
+    echo    "  ──────────────────────────────────────────"
+    printf  "  %-22s %s\n" "Site:" "$CHECKMK_SITE"
+    printf  "  %-22s %s\n" "Current version:" "$INSTALLED_VERSION"
+    printf  "  %-22s %s\n" "Target version:" "$LATEST_VERSION"
+    printf  "  %-22s %s\n" "Backup location:" "$BACKUP_DIR"
+    echo    "  ──────────────────────────────────────────"
+    echo ""
+    msg_warn "The site will be STOPPED during the update."
+
+    if (( AUTO_YES )); then
+        debug_log "Auto-yes: proceeding with update."
+        return 0
+    fi
+
+    while true; do
+        read -rp "Proceed with update? [y/N]: " confirm
+        case "${confirm:-N}" in
+            [Yy]) debug_log "User confirmed update."; return 0 ;;
+            [Nn]|"") msg_info "Update cancelled."; exit 0 ;;
+            *) echo "Please enter 'y' or 'n'." ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Print completion summary
+# ---------------------------------------------------------------------------
+print_summary() {
+    local new_version elapsed_s elapsed_m elapsed_sec
+    new_version=$(omd version "$CHECKMK_SITE" 2>/dev/null | awk '{print $NF}')
+    elapsed_s=$(( SECONDS - START_SECONDS ))
+    elapsed_m=$(( elapsed_s / 60 ))
+    elapsed_sec=$(( elapsed_s % 60 ))
+
+    local site_status site_status_text
+    if omd status "$CHECKMK_SITE" &>/dev/null; then
+        site_status_text="${TEXT_GREEN}Running${TEXT_RESET}"
+    else
+        site_status_text="${TEXT_RED}NOT running${TEXT_RESET}"
+    fi
+
+    echo ""
+    echo -e "${TEXT_BOLD}  ╔══════════════════════════════════════════╗"
+    echo -e "  ║            Update Complete                ║"
+    echo -e "  ╚══════════════════════════════════════════╝${TEXT_RESET}"
+    echo    "  ──────────────────────────────────────────"
+    printf  "  %-22s %s\n" "Site:" "$CHECKMK_SITE"
+    printf  "  %-22s %s\n" "Previous version:" "$INSTALLED_VERSION"
+    printf  "  %-22s %s\n" "New version:" "${new_version:-unknown}"
+    if [[ -n "$BACKUP_FILE_PATH" && -f "$BACKUP_FILE_PATH" ]]; then
+        local backup_mb
+        backup_mb=$(( $(stat -c%s "$BACKUP_FILE_PATH" 2>/dev/null || echo 0) / 1048576 ))
+        printf  "  %-22s %s (%s MB)\n" "Backup:" "$BACKUP_FILE_PATH" "$backup_mb"
+    else
+        printf  "  %-22s %s\n" "Backup:" "none"
+    fi
+    echo -ne "  "; printf "%-22s " "Site status:"; echo -e "$site_status_text"
+    printf  "  %-22s %dm %ds\n" "Duration:" "$elapsed_m" "$elapsed_sec"
+    printf  "  %-22s %s\n" "Debug log:" "$DEBUG_LOG_FILE"
+    echo    "  ──────────────────────────────────────────"
+    echo ""
+}
+
+# ===========================================================================
+# MAIN
+# ===========================================================================
+
+debug_log "Script start (v${SCRIPT_VERSION})"
 parse_args "$@"
 
+# Self-test exits early
 if (( SELF_TEST )); then
     run_self_test
 fi
 
-check_for_new_script_version
-
-debug_log "---------------------------------"
-debug_log "Checking for root privileges"
-debug_log "---------------------------------"
+# --- Root check (before anything else that modifies system state) ----------
 if (( EUID != 0 )); then
-    error_msg="This script must be run as root. Current user: $(whoami)"
-    echo -e "${TEXT_RED}${error_msg}${TEXT_RESET}"
-    debug_log "$error_msg"
+    msg_error "This script must be run as root. Current user: $(whoami)"
+    msg_info "Run with: sudo $0"
     exit 1
 fi
 
-ensure_omd_available
+# --- Banner ----------------------------------------------------------------
+print_banner
 
+# --- Phase 1: Prerequisites -----------------------------------------------
+msg_phase "Checking prerequisites"
+ensure_omd_available
 check_and_install_packages
 
-debug_log "--------------------------------------------------"
-debug_log "Fetching available Checkmk sites via 'omd sites'..."
-debug_log "--------------------------------------------------"
+# --- Phase 2: Script update check -----------------------------------------
+msg_phase "Checking for updates"
+check_for_new_script_version
 
-if ! OMD_SITES_RAW=$(omd sites 2>&1); then
-    ask_continue_on_error "Failed to query Checkmk sites (omd sites)"
-    exit 1
-fi
+# --- Phase 3: Site detection and version check -----------------------------
+msg_phase "Detecting Checkmk site"
+detect_site
+get_installed_version
+check_disk_space
 
-debug_log "Raw output from 'omd sites':"
-debug_log "$OMD_SITES_RAW"
+# Fetch latest version
+fetch_latest_version
 
-CHECKMK_SITES=($(echo "$OMD_SITES_RAW" | grep -v "^SITE" | awk '{print $1}'))
-debug_log "Detected sites: ${CHECKMK_SITES[*]}"
+msg_info "Installed: ${INSTALLED_VERSION}"
+msg_info "Available: ${LATEST_VERSION}"
 
-if [ ${#CHECKMK_SITES[@]} -eq 0 ]; then
-    debug_log "No Checkmk sites found. Exiting script."
-    echo -e "${TEXT_RED}No Checkmk site found!${TEXT_RESET}"
-    exit 1
-fi
-
-debug_log "---------------------------------"
-debug_log "One or multiple sites detected?"
-debug_log "---------------------------------"
-if [ ${#CHECKMK_SITES[@]} -eq 1 ]; then
-    CHECKMK_SITE=${CHECKMK_SITES[0]}
-    debug_log "Exactly one site found: ${CHECKMK_SITE}"
-else
-    echo -e "${TEXT_YELLOW}Multiple Checkmk sites found. Please select one:${TEXT_RESET}"
-    debug_log "Multiple sites found: ${CHECKMK_SITES[*]}"
-    select site in "${CHECKMK_SITES[@]}"; do
-        if [[ -n "$site" ]]; then
-            CHECKMK_SITE="$site"
-            debug_log "User selected site: ${CHECKMK_SITE}"
-            break
-        else
-            echo "Invalid selection. Please enter a valid number."
-        fi
-    done
-fi
-
-debug_log "--------------------------------------------------"
-debug_log "Starting update for site: ${CHECKMK_SITE}"
-debug_log "--------------------------------------------------"
-
-CHECKMK_DIR="/opt/omd/sites/${CHECKMK_SITE}"
-INSTALLED_VERSION=$(omd version | awk '{print $NF}')
-DISTRO=$(lsb_release -sc)
-ARCH=$(dpkg --print-architecture)
-
-debug_log "Site name: ${CHECKMK_SITE}"
-debug_log "Site directory: ${CHECKMK_DIR}"
-debug_log "Installed version (omd version): ${INSTALLED_VERSION}"
-debug_log "Linux distribution: ${DISTRO}"
-debug_log "Architecture: ${ARCH}"
-
-debug_log "---------------------------------"
-debug_log "Checking disk space"
-debug_log "---------------------------------"
-REQUIRED_SPACE=2048
-AVAILABLE_SPACE=$(df --output=avail /opt/omd/ | tail -n 1)
-
-debug_log "Available space on /opt/omd/: ${AVAILABLE_SPACE} KB"
-debug_log "Required minimum space: ${REQUIRED_SPACE} MB"
-
-if (( AVAILABLE_SPACE < REQUIRED_SPACE * 1024 )); then
-    ask_continue_on_error "Not enough disk space on /opt/omd/. Available: ${AVAILABLE_SPACE} KB"
-else
-    debug_log "Sufficient disk space available."
-fi
-
-debug_log "---------------------------------"
-debug_log "Checking for latest version"
-debug_log "---------------------------------"
-echo -e "${TEXT_YELLOW}Checking for the latest available Checkmk version...${TEXT_RESET}"
-TMP_FILE="${TMP_DIR}/checkmk_versions.html"
-curl -s https://checkmk.com/download -o "$TMP_FILE"
-CURL_EXIT=$?
-debug_log "curl -s https://checkmk.com/download -> Exit code: ${CURL_EXIT}"
-
-if [ $CURL_EXIT -ne 0 ]; then
-    ask_continue_on_error "Error fetching Checkmk versions (curl exit code: ${CURL_EXIT})"
-fi
-
-LATEST_VERSION=$(grep -oP '(?<=check-mk-raw-)[0-9]+\.[0-9]+\.[0-9]+(?:p[0-9]+)?' "$TMP_FILE" | sort -V | tail -n 1)
-debug_log "Latest detected version: ${LATEST_VERSION}"
-
-if [ -z "$LATEST_VERSION" ]; then
-    echo -e "${TEXT_RED}Could not determine the latest Checkmk version. Aborting.${TEXT_RESET}"
-    debug_log "Latest version detection failed; aborting run."
-    exit 1
-fi
-
-echo -e "${TEXT_YELLOW}Installed version: ${TEXT_GREEN}${INSTALLED_VERSION}${TEXT_RESET}"
-echo -e "${TEXT_YELLOW}Latest available version: ${TEXT_GREEN}${LATEST_VERSION}${TEXT_RESET}"
-
-if [ "$INSTALLED_VERSION" == "$LATEST_VERSION.cre" ]; then
-    echo -e "${TEXT_GREEN}Checkmk is already up to date.${TEXT_RESET}"
-    debug_log "Checkmk is already up to date. No updates required."
-    rm -f "$TMP_FILE"
-    final_cleanup
+if [[ "$INSTALLED_VERSION" == "$LATEST_VERSION" ]]; then
+    msg_ok "Checkmk is already up to date."
+    debug_log "Already up to date."
     exit 0
 fi
 
-debug_log "---------------------------------"
-debug_log "Stopping Checkmk site before backup"
-debug_log "---------------------------------"
-echo -e "${TEXT_YELLOW}Stopping Checkmk site (${CHECKMK_SITE}) for a consistent backup...${TEXT_RESET}"
-omd stop "$CHECKMK_SITE" &>> "$DEBUG_LOG_FILE"
-STOP_EXIT=$?
-debug_log "omd stop (pre-backup) -> Exit code: ${STOP_EXIT}"
+# --- Confirmation ----------------------------------------------------------
+confirm_update
 
-if [ $STOP_EXIT -ne 0 ]; then
-    ask_continue_on_error "Error stopping the site before backup (omd stop exit code: ${STOP_EXIT})"
+# --- Phase 4: Backup ------------------------------------------------------
+msg_phase "Creating backup"
+msg_info "Stopping site ${CHECKMK_SITE} for consistent backup..."
+omd stop "$CHECKMK_SITE" &>> "$DEBUG_LOG_FILE" &
+local_pid=$!
+spinner "$local_pid" "Stopping site..."
+stop_exit=$?
+SITE_WAS_STOPPED=1
+debug_log "omd stop -> Exit code: ${stop_exit}"
+
+if [[ $stop_exit -ne 0 ]]; then
+    ask_continue_on_error \
+        "Failed to stop site (exit code: ${stop_exit})." \
+        "The backup may be inconsistent if the site is still running."
 else
-    debug_log "Site ${CHECKMK_SITE} stopped prior to backup."
+    msg_ok "Site stopped."
 fi
 
 create_site_backup
 
-debug_log "---------------------------------"
-debug_log "Downloading update"
-debug_log "---------------------------------"
-echo -e "${TEXT_BLUE}Update available! Starting download...${TEXT_RESET}"
-UPDATE_PACKAGE="check-mk-raw-${LATEST_VERSION}_0.${DISTRO}_${ARCH}.deb"
-DOWNLOAD_URL="https://download.checkmk.com/checkmk/${LATEST_VERSION}/${UPDATE_PACKAGE}"
+# --- Phase 5: Download ----------------------------------------------------
+msg_phase "Downloading update"
+download_update
+download_exit=$?
 
-debug_log "Update package: ${UPDATE_PACKAGE}"
-debug_log "Download URL: ${DOWNLOAD_URL}"
-
-CONTENT_LENGTH_BYTES=$(curl -sI "$DOWNLOAD_URL" 2>>"$DEBUG_LOG_FILE" | awk '/[Cc]ontent-[Ll]ength/ {print $2}' | tr -d '\r')
-
-if [[ -n "$CONTENT_LENGTH_BYTES" ]]; then
-    CONTENT_LENGTH_MB=$(awk -v bytes="$CONTENT_LENGTH_BYTES" 'BEGIN { printf "%.2f", bytes/1048576 }')
-    echo -e "${TEXT_YELLOW}Estimated download size: ${CONTENT_LENGTH_MB} MB${TEXT_RESET}"
-    debug_log "Expected download size: ${CONTENT_LENGTH_BYTES} bytes (${CONTENT_LENGTH_MB} MB)"
-else
-    echo -e "${TEXT_YELLOW}Estimated download size: unknown (server did not provide Content-Length)${TEXT_RESET}"
-    debug_log "Content-Length header missing; proceeding without size hint"
+if [[ $download_exit -ne 0 || -z "$DOWNLOAD_PACKAGE_PATH" || ! -s "$DOWNLOAD_PACKAGE_PATH" ]]; then
+    ask_continue_on_error \
+        "No valid package available for installation." \
+        "The update cannot proceed without a valid package."
+    exit 1
 fi
 
-if ! curl --fail --location --progress-bar -o "${TMP_DIR}/${UPDATE_PACKAGE}" "$DOWNLOAD_URL"; then
-    CURL_EXIT=$?
-    debug_log "curl download failed -> Exit code: ${CURL_EXIT}"
-    ask_continue_on_error "Error downloading the update package (curl exit code: ${CURL_EXIT})"
-elif [ ! -s "${TMP_DIR}/${UPDATE_PACKAGE}" ]; then
-    debug_log "curl reported success but produced an empty file"
-    ask_continue_on_error "Download finished but the package file is empty."
-else
-    DOWNLOADED_BYTES=$(stat -c%s "${TMP_DIR}/${UPDATE_PACKAGE}")
-    DOWNLOADED_MB=$(awk -v bytes="$DOWNLOADED_BYTES" 'BEGIN { printf "%.2f", bytes/1048576 }')
-    debug_log "Download successful. File: ${TMP_DIR}/${UPDATE_PACKAGE} (${DOWNLOADED_BYTES} bytes/${DOWNLOADED_MB} MB)"
-    echo -e "${TEXT_GREEN}Download completed: ${DOWNLOADED_MB} MB${TEXT_RESET}"
-fi
+# --- Phase 6: Install and update ------------------------------------------
+msg_phase "Installing update"
+install_package "$DOWNLOAD_PACKAGE_PATH"
 
-debug_log "---------------------------------"
-debug_log "Installing the update"
-debug_log "---------------------------------"
-echo -e "${TEXT_YELLOW}Installing update package...${TEXT_RESET}"
-dpkg -i "${TMP_DIR}/${UPDATE_PACKAGE}" &>> "$DEBUG_LOG_FILE"
-DPKG_EXIT=$?
-debug_log "dpkg installation -> Exit code: ${DPKG_EXIT}"
-
-if [ $DPKG_EXIT -ne 0 ]; then
-    ask_continue_on_error "Error during installation (dpkg exit code: ${DPKG_EXIT})"
-else
-    debug_log "Update package installed successfully."
-fi
-
-debug_log "--------------------------------------------------"
-debug_log "Starting omd update ${CHECKMK_SITE}..."
-debug_log "--------------------------------------------------"
-echo -e "${TEXT_YELLOW}Running omd update for ${CHECKMK_SITE}...${TEXT_RESET}"
+msg_info "Running omd update for ${CHECKMK_SITE}..."
 omd update "$CHECKMK_SITE" 2>&1 | tee -a "$DEBUG_LOG_FILE"
-UPDATE_EXIT=${PIPESTATUS[0]}
+update_exit=${PIPESTATUS[0]}
 
-if [ $UPDATE_EXIT -ne 0 ]; then
-    ask_continue_on_error "Error running omd update (exit code: ${UPDATE_EXIT})"
+if [[ $update_exit -ne 0 ]]; then
+    ask_continue_on_error \
+        "omd update failed (exit code: ${update_exit})." \
+        "Check the debug log. You may need to run 'omd update ${CHECKMK_SITE}' manually."
 else
-    debug_log "omd update completed successfully."
+    msg_ok "omd update completed."
 fi
 
-debug_log "---------------------------------"
-debug_log "Starting Checkmk site"
-debug_log "---------------------------------"
-echo -e "${TEXT_YELLOW}Starting Checkmk site (${CHECKMK_SITE})...${TEXT_RESET}"
-omd start "$CHECKMK_SITE" &>> "$DEBUG_LOG_FILE"
-START_EXIT=$?
-debug_log "omd start -> Exit code: ${START_EXIT}"
+# --- Phase 7: Verification ------------------------------------------------
+msg_phase "Verifying and starting site"
 
-if [ $START_EXIT -ne 0 ]; then
-    ask_continue_on_error "Error starting the site (omd start exit code: ${START_EXIT})"
+msg_info "Starting site ${CHECKMK_SITE}..."
+omd start "$CHECKMK_SITE" &>> "$DEBUG_LOG_FILE" &
+local_pid=$!
+spinner "$local_pid" "Starting site..."
+start_exit=$?
+debug_log "omd start -> Exit code: ${start_exit}"
+
+if [[ $start_exit -ne 0 ]]; then
+    ask_continue_on_error \
+        "Failed to start site (exit code: ${start_exit})." \
+        "Try starting manually: omd start ${CHECKMK_SITE}"
 else
-    debug_log "Site ${CHECKMK_SITE} started."
+    SITE_WAS_STOPPED=0
+    msg_ok "Site started."
 fi
 
-debug_log "---------------------------------"
-debug_log "Cleanup & status check"
-debug_log "---------------------------------"
-echo -e "${TEXT_YELLOW}Running omd cleanup...${TEXT_RESET}"
-omd cleanup &>> "$DEBUG_LOG_FILE"
-CLEANUP_EXIT=$?
-debug_log "omd cleanup -> Exit code: ${CLEANUP_EXIT}"
+msg_info "Running omd cleanup..."
+omd cleanup &>> "$DEBUG_LOG_FILE" || true
 
-echo -e "${TEXT_YELLOW}Checking site status...${TEXT_RESET}"
-STATUS_OUTPUT=$(omd status "$CHECKMK_SITE")
-STATUS_EXIT=$?
-
-debug_log "omd status:\n${STATUS_OUTPUT}"
-debug_log "omd status exit code: ${STATUS_EXIT}"
-
-echo -e "${TEXT_BLUE}Checkmk status:${TEXT_RESET}\n$STATUS_OUTPUT"
-
-if [ $STATUS_EXIT -ne 0 ]; then
-    echo -e "${TEXT_RED}Checkmk site is NOT running correctly!${TEXT_RESET}"
-    debug_log "Site ${CHECKMK_SITE} is NOT running correctly."
-else
-    echo -e "${TEXT_GREEN}Checkmk site is running fine.${TEXT_RESET}"
-    debug_log "Site ${CHECKMK_SITE} is running fine."
-fi
-
-debug_log "---------------------------------"
-debug_log "Final cleanup"
-debug_log "---------------------------------"
-echo -e "${TEXT_GREEN}Update completed and cleanup done!${TEXT_RESET}"
-debug_log "Update completed."
-
-echo -e "${TEXT_BLUE}Debug log remains at: ${DEBUG_LOG_FILE}${TEXT_RESET}"
+# --- Summary ---------------------------------------------------------------
+print_summary
 exit 0
