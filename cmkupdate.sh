@@ -1326,77 +1326,132 @@ check_apt_dpkg_locks() {
     )
 
     local lock_holders=""
-    local tool=""
-    local busy=0
+    local lock_check_method="unknown"
+    local locks_busy=0
 
-    if command -v lsof &>/dev/null; then
-        tool="lsof"
+    # Prefer lslocks (util-linux) because it detects actual locks without extra packages.
+    if command -v lslocks &>/dev/null; then
+        lock_check_method="lslocks"
+        local pid comm path
+        while read -r pid comm path _; do
+            [[ -n "${pid:-}" ]] || continue
+            [[ -n "${path:-}" ]] || continue
+            local f
+            for f in "${lock_files[@]}"; do
+                if [[ "$path" == "$f" ]]; then
+                    locks_busy=1
+                    lock_holders+="${f}: ${pid} (${comm})"$'\n'
+                fi
+            done
+        done < <(lslocks -n -u -o PID,COMMAND,PATH 2>/dev/null || true)
+    elif command -v lsof &>/dev/null; then
+        lock_check_method="lsof"
+        local f pids
+        for f in "${lock_files[@]}"; do
+            [[ -e "$f" ]] || continue
+            pids=$(lsof -t "$f" 2>/dev/null | tr '\n' ' ' | sed -E 's/[[:space:]]+$//')
+            if [[ -n "$pids" ]]; then
+                locks_busy=1
+                lock_holders+="${f}: ${pids}"$'\n'
+            fi
+        done
     elif command -v fuser &>/dev/null; then
-        tool="fuser"
+        lock_check_method="fuser"
+        local f pids
+        for f in "${lock_files[@]}"; do
+            [[ -e "$f" ]] || continue
+            pids=$(fuser "$f" 2>/dev/null | tr ' ' '\n' | awk 'NF{print}' | tr '\n' ' ' | sed -E 's/[[:space:]]+$//')
+            if [[ -n "$pids" ]]; then
+                locks_busy=1
+                lock_holders+="${f}: ${pids}"$'\n'
+            fi
+        done
     fi
 
-    local f pids
-    for f in "${lock_files[@]}"; do
-        [[ -e "$f" ]] || continue
-        pids=""
-        if [[ "$tool" == "lsof" ]]; then
-            pids=$(lsof -t "$f" 2>/dev/null | tr '\n' ' ' | sed -E 's/[[:space:]]+$//')
-        elif [[ "$tool" == "fuser" ]]; then
-            pids=$(fuser "$f" 2>/dev/null | tr ' ' '\n' | awk 'NF{print}' | tr '\n' ' ' | sed -E 's/[[:space:]]+$//')
-        fi
-        if [[ -n "$pids" ]]; then
-            busy=1
-            lock_holders+="${f}: ${pids}"$'\n'
-        fi
-    done
-
     local proc_matches=""
+    local proc_busy=0
     if command -v ps &>/dev/null; then
         proc_matches=$(
             ps -eo pid=,comm=,args= 2>/dev/null \
                 | awk '
-                    $2 ~ /^(apt|apt-get|dpkg|unattended-upgrades|apt.systemd.daily|packagekitd)$/ {print; next}
-                    $0 ~ /unattended-upgrades/ {print}
-                ' \
+                    $2 ~ /^(ps|awk|sed)$/ { next }
+                    $2 ~ /^(apt|apt-get|dpkg)$/ { print; next }
+                    $0 ~ /apt\\.systemd\\.daily/ { print; next }
+                    $0 ~ /\/usr\/share\/unattended-upgrades\/unattended-upgrade([^[:alnum:]_-]|$)/ { print; next }
+                ' 2>>"$DEBUG_LOG_FILE" \
                 | sed -n '1,10p'
         )
-        [[ -n "$proc_matches" ]] && busy=1
+        [[ -n "$proc_matches" ]] && proc_busy=1
     fi
 
-    if (( ! busy )); then
-        debug_log "No APT/DPKG locks detected."
-        return 0
-    fi
+    if (( locks_busy )); then
+        local context="APT/DPKG appears to be locked.\n\nRecommended action:\n  - Wait for package operations to finish\n  - Then re-run this script"
+        context+="\n\nLock holders (method: ${lock_check_method}):\n${lock_holders}"
+        if [[ -n "$proc_matches" ]]; then
+            context+="\nRunning processes (sample):\n${proc_matches}"
+        fi
 
-    local context="Another package manager process appears to be running.\n\nRecommended action:\n  - Wait for it to finish (e.g. unattended-upgrades)\n  - Then re-run this script"
-    if [[ -n "$lock_holders" ]]; then
-        context+="\n\nLock holders (PID list may be incomplete):\n${lock_holders}"
-    fi
-    if [[ -n "$proc_matches" ]]; then
-        context+="\nRunning processes (sample):\n${proc_matches}"
-    fi
+        debug_log "APT/DPKG busy (method: ${lock_check_method}). Lock holders: ${lock_holders:-none}. Proc sample: ${proc_matches:-none}"
 
-    debug_log "APT/DPKG busy. Lock holders: ${lock_holders:-none}. Proc sample: ${proc_matches:-none}"
+        if (( DRY_RUN )); then
+            msg_warn "APT/DPKG appears to be busy (locks detected)."
+            msg_detail "$(echo -e "$context")"
+            msg_warn "Dry-run: continuing despite APT/DPKG activity."
+            debug_log "Dry-run: not aborting on APT/DPKG locks."
+            return 0
+        fi
 
-    if (( DRY_RUN )); then
-        msg_warn "APT/DPKG appears to be busy (locks/processes detected)."
+        msg_error "APT/DPKG appears to be busy (locks detected)."
         msg_detail "$(echo -e "$context")"
-        msg_warn "Dry-run: continuing despite APT/DPKG activity."
-        debug_log "Dry-run: not aborting on APT/DPKG locks."
+
+        # In automation, fail fast instead of hanging on dpkg/apt locks.
+        if (( AUTO_YES )); then
+            exit 1
+        fi
+
+        ask_continue_on_error \
+            "Package manager is busy (APT/DPKG lock detected)." \
+            "Continuing may fail or hang. Consider aborting and re-running once APT/DPKG is idle."
         return 0
     fi
 
-    msg_error "APT/DPKG appears to be busy (locks/processes detected)."
-    msg_detail "$(echo -e "$context")"
+    # No locks found.
+    debug_log "No APT/DPKG locks detected (method: ${lock_check_method}). Proc sample: ${proc_matches:-none}"
 
-    # In automation, fail fast instead of hanging on dpkg/apt locks.
-    if (( AUTO_YES )); then
-        exit 1
+    # If we could not check locks at all, fall back to process detection (conservative).
+    if [[ "$lock_check_method" == "unknown" && $proc_busy -eq 1 ]]; then
+        local context="Another package manager process appears to be running.\n\nRecommended action:\n  - Wait for it to finish\n  - Then re-run this script"
+        context+="\n\nRunning processes (sample):\n${proc_matches}"
+
+        debug_log "APT/DPKG may be busy (lock state unknown). Proc sample: ${proc_matches:-none}"
+
+        if (( DRY_RUN )); then
+            msg_warn "APT/DPKG may be busy (processes detected; lock state unknown)."
+            msg_detail "$(echo -e "$context")"
+            msg_warn "Dry-run: continuing despite APT/DPKG activity."
+            debug_log "Dry-run: not aborting on unknown lock state."
+            return 0
+        fi
+
+        msg_error "APT/DPKG may be busy (processes detected; lock state unknown)."
+        msg_detail "$(echo -e "$context")"
+
+        if (( AUTO_YES )); then
+            exit 1
+        fi
+
+        ask_continue_on_error \
+            "Package manager may be busy (processes detected; lock state unknown)." \
+            "Continuing may fail or hang. Consider aborting and re-running once APT/DPKG is idle."
+        return 0
     fi
 
-    ask_continue_on_error \
-        "Package manager is busy (APT/DPKG lock detected)." \
-        "Continuing may fail or hang. Consider aborting and re-running once APT/DPKG is idle."
+    if (( proc_busy )); then
+        msg_warn "APT/DPKG-related processes detected, but no locks were found (method: ${lock_check_method})."
+        msg_detail "$(echo -e "If the update later fails due to locks, wait for those processes to finish and re-run.\n\nRunning processes (sample):\n${proc_matches}")"
+    fi
+
+    return 0
 }
 
 check_dpkg_health() {
@@ -1497,61 +1552,46 @@ compute_download_url() {
 precheck_download_url_and_tmp_space() {
     compute_download_url
 
-    msg_info "Pre-check: validating download URL for ${UPDATE_PACKAGE}..."
-    local headers http_code content_length
+    # NOTE: We intentionally do NOT perform an HTTP/HEAD URL precheck here.
+    # Some environments (proxies, firewalls, CDNs) can return empty headers for HEAD requests,
+    # which caused false negatives. The actual download step uses curl --fail and will error
+    # out cleanly if the package cannot be fetched.
 
-    headers=$(curl -sSIL --proto =https --max-time 20 "$DOWNLOAD_URL" 2>>"$DEBUG_LOG_FILE" || true)
-    http_code=$(echo "$headers" | awk '/^HTTP\\// {code=$2} END {print code}')
-    content_length=$(echo "$headers" | awk 'BEGIN{IGNORECASE=1} $1=="Content-Length:"{cl=$2} END{gsub("\\r","",cl); print cl}')
+    msg_info "Pre-check: checking temp free space for download..."
+    local avail_kb avail_mb
+    avail_kb=$(df --output=avail "$TMP_DIR" 2>/dev/null | tail -n 1 | tr -d ' ')
 
-    if [[ -z "$headers" ]] || [[ -z "$http_code" ]]; then
-        msg_error "Could not validate the download URL (no HTTP response)."
-        msg_detail "URL: ${DOWNLOAD_URL}"
-        debug_log "Download URL precheck failed: empty headers or HTTP code. URL: ${DOWNLOAD_URL}"
+    if ! [[ "${avail_kb:-}" =~ ^[0-9]+$ ]]; then
+        msg_warn "Could not determine free space for temp directory ${TMP_DIR}."
+        debug_log "Temp space precheck: df returned non-numeric value: '${avail_kb:-}'"
+        return 0
+    fi
+
+    avail_mb=$(( avail_kb / 1024 ))
+    debug_log "Temp space: available ${avail_kb} KB (${avail_mb} MB) on ${TMP_DIR}"
+
+    # Conservative thresholds (we don't know the exact package size without an HTTP request).
+    if (( avail_mb < 256 )); then
+        msg_error "Not enough free space in temp directory filesystem for download."
+        msg_detail "Available: ${avail_mb} MB (temp dir: ${TMP_DIR})"
+        debug_log "Temp space precheck failed (available ${avail_mb} MB < 256 MB)."
         if (( AUTO_YES )); then
             exit 1
         fi
         ask_continue_on_error \
-            "Download URL validation failed." \
-            "Continuing will likely fail during the download phase."
+            "Low free space in temp directory (${avail_mb} MB)." \
+            "The download will likely fail. Consider freeing space and re-running."
         return 0
     fi
 
-    if [[ "$http_code" != "200" ]]; then
-        msg_error "No downloadable package found for this system (HTTP ${http_code})."
-        msg_detail "URL: ${DOWNLOAD_URL}"
-        msg_detail "Your distro codename: $(lsb_release -sc), arch: $(dpkg --print-architecture)"
-        debug_log "Download URL precheck: HTTP ${http_code} for ${DOWNLOAD_URL}"
-        exit 1
+    if (( avail_mb < 1024 )); then
+        msg_warn "Low free space in temp directory filesystem (${avail_mb} MB available)."
+        msg_detail "Download may fail if there is not enough space. Temp dir: ${TMP_DIR}"
+        debug_log "Temp space precheck warning (available ${avail_mb} MB < 1024 MB)."
+        return 0
     fi
 
-    if [[ "$content_length" =~ ^[0-9]+$ ]]; then
-        DOWNLOAD_CONTENT_LENGTH="$content_length"
-        debug_log "Content-Length: ${DOWNLOAD_CONTENT_LENGTH} bytes"
-
-        local avail_kb
-        avail_kb=$(df --output=avail "$TMP_DIR" 2>/dev/null | tail -n 1 | tr -d ' ')
-
-        if [[ "$avail_kb" =~ ^[0-9]+$ ]]; then
-            local needed_kb buffer_kb
-            buffer_kb=$(( 256 * 1024 )) # +256MB safety buffer
-            needed_kb=$(( (DOWNLOAD_CONTENT_LENGTH / 1024) + buffer_kb ))
-            debug_log "Temp space: available ${avail_kb} KB, needed ~${needed_kb} KB (incl buffer)"
-
-            if (( avail_kb < needed_kb )); then
-                msg_error "Not enough free space in temp directory filesystem for download."
-                msg_detail "Available: $(( avail_kb / 1024 )) MB, needed (incl buffer): $(( needed_kb / 1024 )) MB"
-                msg_detail "Temp dir: ${TMP_DIR}"
-                debug_log "Temp space precheck failed."
-                exit 1
-            fi
-        else
-            msg_warn "Could not determine free space for temp directory ${TMP_DIR}."
-            debug_log "Temp space precheck: df returned non-numeric value: '${avail_kb:-}'"
-        fi
-    else
-        debug_log "No valid Content-Length header found; skipping temp space size check."
-    fi
+    msg_ok "Temp space: ${avail_mb} MB available."
 }
 
 precheck_backup_destination() {
@@ -1600,32 +1640,53 @@ check_omd_update_compatibility() {
     (( DRY_RUN )) && return 0
 
     debug_log "Checking 'omd update' flag compatibility..."
-    local help_out
-    help_out=$(omd update --help 2>&1 || true)
-    if [[ -z "$help_out" ]] || [[ "$help_out" == *"Unknown option"* ]]; then
-        help_out=$(omd update -h 2>&1 || true)
-    fi
-    if [[ -z "$help_out" ]]; then
-        help_out=$(omd help update 2>&1 || true)
-    fi
-
-    if [[ -z "$help_out" ]]; then
-        msg_warn "Could not verify 'omd update' flag compatibility (no help output)."
-        debug_log "omd update help output unavailable; skipping flag compatibility check."
-        return 0
-    fi
+    # Do not rely on 'omd --help' listing global options. Some distributions accept
+    # global flags like --force/-V but do not show them in help output.
+    # Instead, test whether omd *parses* the flags by running help through the
+    # real subcommand path (harmless; does not update anything).
 
     local missing=()
-    echo "$help_out" | grep -q -- '--force' || missing+=("--force")
-    echo "$help_out" | grep -q -- '--conflict' || missing+=("--conflict")
-    echo "$help_out" | grep -q -- ' -V' || echo "$help_out" | grep -q -- $'\n-V' || missing+=("-V")
+
+    # Check that 'omd update' supports --conflict (needed for non-interactive conflict handling).
+    local update_help
+    update_help=$(omd update --help 2>&1 || true)
+    if [[ -z "$update_help" ]] || [[ "$update_help" == *"Unknown option"* ]]; then
+        update_help=$(omd update -h 2>&1 || true)
+    fi
+    if [[ -z "$update_help" ]]; then
+        update_help=$(omd help update 2>&1 || true)
+    fi
+    if [[ -n "$update_help" ]]; then
+        echo "$update_help" | grep -q -- '--conflict' || missing+=("--conflict")
+    else
+        msg_warn "Could not verify 'omd update' options (no help output)."
+        debug_log "omd update help output unavailable; skipping --conflict check."
+    fi
+
+    # Check that omd accepts --force as a global flag (best effort).
+    local test_out
+    test_out=$(omd --force update --help 2>&1)
+    if echo "$test_out" | grep -qiE 'unknown option|unrecognized option|illegal option'; then
+        missing+=("--force")
+    fi
+
+    # Check that omd accepts -V as a global flag. Use the installed site version to
+    # avoid failing on a not-yet-installed target version.
+    if [[ -n "${INSTALLED_VERSION_RAW:-}" ]]; then
+        test_out=$(omd -V "${INSTALLED_VERSION_RAW}" update --help 2>&1)
+        if echo "$test_out" | grep -qiE 'unknown option|unrecognized option|illegal option'; then
+            missing+=("-V")
+        fi
+    else
+        debug_log "Skipping -V parse test (INSTALLED_VERSION_RAW not available)."
+    fi
 
     if [[ ${#missing[@]} -gt 0 ]]; then
-        msg_error "'omd update' does not appear to support required flags: ${missing[*]}"
+        msg_error "'omd' does not appear to support required flags: ${missing[*]}"
         msg_detail "This script uses:"
         msg_detail "  omd --force -V \"<LATEST_VERSION>.cre\" update --conflict=install \"<SITE>\""
         msg_detail "Please update your Checkmk/OMD installation or adjust the script."
-        debug_log "omd update flag check failed. Missing: ${missing[*]}"
+        debug_log "omd flag parse test failed. Missing: ${missing[*]}"
         exit 1
     fi
 
@@ -1718,7 +1779,7 @@ download_update() {
     local content_length
     content_length="${DOWNLOAD_CONTENT_LENGTH:-}"
     if ! [[ "$content_length" =~ ^[0-9]+$ ]]; then
-        content_length=$(curl -sI --proto =https "$download_url" 2>>"$DEBUG_LOG_FILE" \
+        content_length=$(curl -sI --proto =https --max-time 20 "$download_url" 2>>"$DEBUG_LOG_FILE" \
             | awk '/[Cc]ontent-[Ll]ength/ {print $2}' | tr -d '\r')
     fi
 
