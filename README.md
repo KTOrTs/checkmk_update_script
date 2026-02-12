@@ -1,273 +1,152 @@
 # Checkmk Update Script
 
-A single Bash script that automates Checkmk Raw Edition updates on Debian/Ubuntu. It handles dependency checks, site backup with live progress, package download, installation, and post-update verification -- all in one command.
+Interactive update helper for **Checkmk Raw Edition** OMD sites on Debian/Ubuntu.
 
-```
-  ╔══════════════════════════════════════════╗
-  ║      Checkmk Update Script v1.4.0        ║
-  ╚══════════════════════════════════════════╝
-```
+- Default: terminal TUI (progress, confirmations, phase tracker)
+- Automation: `--yes --no-ui`
+- Backup is enabled by default (recommended)
 
----
+## Highlights
 
-## Features
+- 7-phase guided run (prereqs, site detection, backup, download, install, update, verify)
+- Pre-flight safety checks: APT/DPKG locks, `dpkg --audit`, download URL + temp space, backup destination free space
+- Backup with live progress to `/var/backups/checkmk` (can be skipped with `--no-backup`, not recommended)
+- Non-interactive OMD update (uses `omd --force ... update --conflict=install` to avoid prompts)
+- Preserves initial site state (won't auto-start a site that was stopped before the run)
+- Secure temp directory + debug log path printed at startup
+- `NO_COLOR` supported (disable colored output)
 
-- **7-phase guided workflow** -- Prerequisites, script update check, site detection, backup, download, install, and verification with numbered phase headers.
-- **Secure temp directory** (`mktemp -d` with `chmod 700`) instead of a predictable path.
-- **HTTPS enforcement** (`--proto =https`) on all outgoing requests.
-- **Pre-flight safety checks** -- detects APT/DPKG locks, warns about broken `dpkg` state, validates the download URL, and checks temp/backup free space before stopping the site.
-- **Live backup progress** showing compressed archive growth, percentage, and elapsed time.
-- **Spinner animations** for long-running operations (dpkg install, omd stop/start).
-- **Pre-update confirmation summary** showing site, versions, and backup location before committing.
-- **Post-update completion summary** with version diff, backup size, site status, and total duration.
-- **EXIT trap safety net** -- automatically restarts the site if the script exits unexpectedly mid-update.
-- **`NO_COLOR` support** -- all color output respects the `NO_COLOR` environment variable and non-interactive terminals.
-- **Self-update with shebang validation** -- checks GitHub releases and validates downloaded scripts before replacing.
-- **Edition-aware version comparison** -- correctly strips `.cre`/`.cee` suffixes for accurate comparisons.
-- **Interactive UI by default** -- built-in terminal TUI (box drawing + progress widgets), with `--no-ui` fallback to plain prompts.
-- **Dry-run mode** -- downloads the target package, without modifying the system.
-- **Preserves initial site state** -- if the site was stopped before the run, it stays stopped and the script asks whether to start it at the end.
+## Suitable For
 
----
+- Updating Checkmk **Raw** sites (edition `.cre`) managed by `omd`
+- Single-host updates where you want a guided flow with safety checks
+- CI/automation where you want a non-interactive run that fails fast on unsafe conditions
 
-## Requirements
+## Not Suitable For
 
-| Requirement | Details |
-|---|---|
-| **OS** | Debian or Ubuntu |
-| **Privileges** | Root for a real update. `--self-test` and `--dry-run` do not require root. |
-| **Checkmk** | Raw Edition site managed by `omd` |
-| **Commands** | `omd`, `lsb_release`, `curl`, `dpkg`, `awk`, `grep`, `df`, `sort`, `sed`, `find` |
-| **Disk space** | At least 2 GB free on `/opt/omd/` plus enough space in `/var/backups/checkmk` for the backup |
+- Checkmk Enterprise/managed editions (`.cee`, `.cme`, `.cce`) (the script aborts)
+- Environments that require package checksum verification (the script does **not** verify checksums)
 
-Missing packages (except `omd`) are installed automatically via `apt-get` during the prerequisites phase.
-
----
-
-## Installation
+## Quick Start
 
 ```bash
 git clone https://github.com/KTOrTs/checkmk_update_script.git
 cd checkmk_update_script
 chmod +x cmkupdate.sh
+sudo ./cmkupdate.sh
 ```
 
----
+Non-interactive example:
 
-## Usage
-
-```
-cmkupdate - Checkmk Raw Edition update helper (v1.4.0)
-
-Usage:
-  ./cmkupdate.sh [options]
-
-Options:
-  -h, --help        Show help text and exit
-  -t, --self-test   Run dependency and syntax check without performing updates
-  -d, --dry-run     Run checks and download package, but do NOT stop site, backup, install, or update
-  -b, --no-backup   Skip the site backup (NOT recommended)
-  -y, --yes         Skip interactive confirmations (for automation/CI)
-  --no-ui           Disable the interactive UI for this run
+```bash
+sudo ./cmkupdate.sh --yes --no-ui
 ```
 
-### Interactive update (recommended)
+Dry-run (download only, no changes):
+
+```bash
+./cmkupdate.sh --dry-run --no-ui
+```
+
+## Requirements
+
+| Requirement | Details |
+|---|---|
+| OS | Debian / Ubuntu |
+| Checkmk | Raw Edition site(s) managed by `omd` (edition `.cre`) |
+| Privileges | Root for a real update. `--self-test` and `--dry-run` can run without root. |
+| Network | HTTPS access to `checkmk.com` and `download.checkmk.com` (and `api.github.com` / `raw.githubusercontent.com` for self-update). |
+| Disk space | `/opt/omd`: >= 2 GB free recommended. Backup dir `/var/backups/checkmk`: roughly >= site size (uncompressed estimate). Temp dir: roughly >= `.deb` size + buffer. |
+| Required commands | `omd`, `lsb_release`, `curl`, `dpkg`, `awk`, `grep`, `df`, `sort`, `sed`, `find`, `du`, `stat`, `ps`, `tee` |
+| Optional (better diagnostics) | `lsof` or `fuser` (shows lock holders for APT/DPKG locks) |
+
+Missing dependencies (except `omd`) are installed automatically via `apt-get` on real runs. `--dry-run` and `--self-test` never install packages.
+
+## Supported CLI Options
+
+| Option | Meaning |
+|---|---|
+| `-h, --help` | Show help and exit |
+| `-t, --self-test` | Syntax + dependency check (no changes) |
+| `-d, --dry-run` | Download target package only (no stop/backup/install/update) |
+| `-n` | Alias for `--dry-run` |
+| `-b, --no-backup` | Skip `omd backup` (not recommended) |
+| `-y, --yes` | Skip confirmations (automation/CI) |
+| `--no-ui` | Disable the TUI for this run (plain prompts) |
+
+## Examples
+
+Interactive (recommended):
 
 ```bash
 sudo ./cmkupdate.sh
 ```
 
-The script opens a TUI by default and walks through all 7 phases, pausing for confirmation before the update begins.
-
-Disable the UI for one run:
+Automation/CI (no prompts, no TUI):
 
 ```bash
-sudo ./cmkupdate.sh --no-ui
+sudo ./cmkupdate.sh --yes --no-ui
 ```
 
-### Non-interactive / CI mode
+Dry-run (download only, keep the `.deb` in the temp directory):
 
 ```bash
-sudo ./cmkupdate.sh --yes
+./cmkupdate.sh --dry-run --no-ui
 ```
 
-Skips all confirmation prompts. Use with caution -- the script will proceed through backup, download, install, and site restart without asking.
-
-The script runs `omd update` with flags to avoid interactive prompts:
-
-```bash
-omd --force -V "<LATEST_VERSION>.cre" update --conflict=install "<SITE>"
-```
-
-### Self-test
-
-```bash
-./cmkupdate.sh --self-test
-```
-
-Validates script syntax and checks that all required commands are available. Does not modify anything on the system. Does not require root.
-
-### Dry-run (no changes)
-
-```bash
-./cmkupdate.sh --dry-run
-```
-
-Runs all checks and downloads the target package, but does not stop the site, create a backup, install, or update.
-
-### Skip backup (NOT recommended)
+Skip backup (not recommended):
 
 ```bash
 sudo ./cmkupdate.sh --no-backup
 ```
 
-Runs a normal update, but skips creating an `omd backup`. If the update fails, you may not be able to roll back.
-
----
-
-## What to Expect
-
-The script runs through 7 numbered phases with semantic output prefixes (`[OK]`, `[INFO]`, `[WARN]`, `[ERROR]`):
-
-```
-==> [1/7] Checking prerequisites
-[OK]      All dependencies satisfied.
-
-==> [2/7] Checking for updates
-[OK]      Script is up to date (1.4.0).
-
-==> [3/7] Detecting Checkmk site
-[OK]      Disk space: 18432 MB available.
-[INFO]    Installed: 2.3.0p24
-[INFO]    Available: 2.3.0p25
-
-  Update Summary
-  ──────────────────────────────────────────
-  Site:                  mysite
-  Current version:       2.3.0p24
-  Target version:        2.3.0p25
-  Backup location:       /var/backups/checkmk
-  ──────────────────────────────────────────
-
-==> [4/7] Creating backup
-[OK]      Site stopped.
-[OK]      Backup created: /var/backups/checkmk/mysite_20250601_140000.omd.gz (312 MB)
-
-==> [5/7] Downloading update
-[OK]      Download complete: 135 MB
-[WARN]    Checksum verification disabled.
-
-==> [6/7] Installing update
-[OK]      Package installed.
-[OK]      omd update completed.
-
-==> [7/7] Verifying and starting site
-[OK]      Site started.
-
-  ╔══════════════════════════════════════════╗
-  ║            Update Complete               ║
-  ╚══════════════════════════════════════════╝
-  Site:                  mysite
-  Previous version:      2.3.0p24
-  New version:           2.3.0p25
-  Backup:                /var/backups/checkmk/mysite_20250601_140000.omd.gz (312 MB)
-  Site status:           Running
-  Duration:              4m 23s
-```
-
----
-
-## Backup Behavior
-
-1. The script **stops the site** before creating the archive to ensure data consistency.
-2. Available space in `/var/backups/checkmk` is checked against the uncompressed site size estimate.
-3. `omd backup` writes a compressed archive while the script displays **live progress** (current MB, percentage relative to estimate, elapsed time).
-4. The final backup path and size are shown in both the console output and the debug log.
-
-Backups are stored in `/var/backups/checkmk` with the naming pattern:
-
-```
-<SITE>_<YYYYMMDD>_<HHMMSS>.omd.gz
-```
-
----
-
-## Restore from Backup
-
-1. Locate the backup in `/var/backups/checkmk`:
-   ```bash
-   ls -lh /var/backups/checkmk/
-   ```
-2. Restore with `omd restore` (requires root):
-   ```bash
-   omd restore <SITE_NAME> /var/backups/checkmk/<FILE>.omd.gz
-   ```
-3. Start the site:
-   ```bash
-   omd start <SITE_NAME>
-   ```
-
----
-
-## Troubleshooting
-
-**Debug log location** -- The log path is printed at startup and uses a secure temp directory. Look for the `[INFO] Debug log:` line in the script output, for example:
-
-```
-[INFO]    Debug log: /tmp/cmkupdate.XXXXXXXXXX/checkmk_update_debug.log
-```
-
-Follow it live during a run:
+Disable colors:
 
 ```bash
-tail -f /tmp/cmkupdate.*/checkmk_update_debug.log
+NO_COLOR=1 sudo ./cmkupdate.sh --no-ui
 ```
 
-**Step failures** -- If any phase fails, the script shows a contextual error message explaining the consequences and asks whether to continue (unless `--yes` is set).
+## What The Script Does
 
-**Unexpected exit** -- The EXIT trap automatically restarts the site if it was stopped and the script exits before completing. The debug log is preserved even after temp file cleanup.
+The run is split into 7 phases:
 
-**Dependency issues** -- Run `./cmkupdate.sh --self-test` to verify that all required commands are available.
+1. **Prerequisites**: checks for APT/DPKG locks and `dpkg --audit` issues.
+2. **Script update check**: checks GitHub Releases for a newer version.
+3. **Site detection**: selects an OMD site and validates it is Raw Edition (`.cre`).
+4. **Stop + backup**: stops the site (only if it was running when the script started) and runs `omd backup` into `/var/backups/checkmk` unless `--no-backup` is set.
+5. **Download**: downloads the matching `.deb` for your distro codename + architecture.
+6. **Install + update**: `dpkg -i` and then runs a non-interactive OMD update:
+   - `omd --force -V "<LATEST_VERSION>.cre" update --conflict=install "<SITE>"`
+7. **Verify**: starts the site if it was running initially. If the site was stopped initially, it stays stopped and the script asks whether to start it.
 
----
+## Backup & Restore
+
+Backups are stored under `/var/backups/checkmk` and can be restored with:
+
+```bash
+omd restore <SITE_NAME> /var/backups/checkmk/<FILE>.omd.gz
+omd start <SITE_NAME>
+```
+
+## Debugging & Troubleshooting
+
+- The script prints a **debug log path** at startup, e.g. `/tmp/cmkupdate.*/checkmk_update_debug.log`.
+- If you hit APT/DPKG lock errors: wait for `unattended-upgrades` / `apt` to finish and re-run.
+- If `dpkg --audit` reports issues: fix with `sudo dpkg --configure -a` and `sudo apt-get -f install` before retrying.
+
+## Security Notes
+
+- Downloads are HTTPS-only, but **no checksum verification** of the downloaded `.deb` is performed.
+
+## Self-Update Notes
+
+- Self-update checks GitHub **Releases** (`/releases/latest`).
+- Your release tags can be like `1.4.0` (no leading `v`). The script uses the release tag to download `cmkupdate.sh` from that tag.
 
 ## Release Notes
 
 See `RELEASE_NOTES.md`.
 
-### Security
+## License
 
-- No checksum verification of downloaded `.deb` packages (download via HTTPS only).
-- Secure temp directory via `mktemp -d` with restricted permissions (`chmod 700`).
-- HTTPS enforcement (`--proto =https`) on all `curl` calls.
-- Shebang validation on self-update downloads.
-
-### CLI
-
-- New `--yes` / `-y` flag to skip all interactive confirmations (automation/CI).
-- New short flags: `-h` for `--help`, `-t` for `--self-test`.
-
-### UX
-
-- 7 numbered phases with clear `==> [N/7]` headers.
-- Semantic output prefixes: `[OK]`, `[ERROR]`, `[WARN]`, `[INFO]` with color coding.
-- `NO_COLOR` environment variable support (see [no-color.org](https://no-color.org)).
-- Spinner animations for long-running background operations.
-- Pre-update confirmation summary box.
-- Post-update completion summary with version diff, backup size, site status, and elapsed time.
-- Contextual error messages that explain consequences of continuing.
-- EXIT trap auto-restarts the site on unexpected script exit.
-
-### Bug Fixes
-
-- Debug log uses append (`>>`) instead of overwrite -- no more accidental log loss.
-- Correct `omd version <SITE>` for site-specific version detection.
-- Edition suffix stripping (`.cre`, `.cee`) for accurate version comparison.
-- Self-update URL now matches the actual repository filename.
-- Safe array parsing via `mapfile -t` for the site list.
-
----
-
-## Disclaimer
-
-This script is provided "as is" without warranty of any kind. Use it at your own risk and always test in a staging environment before running against production systems.
+MIT (see `LICENSE`).

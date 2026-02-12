@@ -142,7 +142,7 @@ left_right() {
 
 # --- Header -----------------------------------------------------------------
 print_header() {
-    local version="${1:-1.4.0}"
+    local version="${1:-$SCRIPT_VERSION}"
     local width inner
     width=$(get_term_width)
     inner=$(( width - 4 ))
@@ -915,7 +915,7 @@ run_self_test() {
 
     # Keep this list aligned with commands used throughout the script.
     # (Most basics come from coreutils; 'sed' and 'find' are separate on Debian/Ubuntu.)
-    local required=(omd lsb_release curl dpkg awk grep df sort sed find)
+    local required=(omd lsb_release curl dpkg awk grep df sort sed find du stat ps tee)
     local missing=()
 
     for cmd in "${required[@]}"; do
@@ -966,7 +966,7 @@ ensure_omd_available() {
 check_and_install_packages() {
     debug_log "Checking required packages..."
 
-    local required_cmds=("lsb_release" "curl" "dpkg" "awk" "grep" "df" "sort" "sed" "find")
+    local required_cmds=("lsb_release" "curl" "dpkg" "awk" "grep" "df" "sort" "sed" "find" "du" "stat" "ps" "tee")
     local missing_packages=()
 
     for cmd in "${required_cmds[@]}"; do
@@ -978,9 +978,10 @@ check_and_install_packages() {
                 dpkg)        missing_packages+=("dpkg") ;;
                 awk)         missing_packages+=("gawk") ;;
                 grep)        missing_packages+=("grep") ;;
-                df|sort)     missing_packages+=("coreutils") ;;
+                df|sort|du|stat|tee) missing_packages+=("coreutils") ;;
                 sed)         missing_packages+=("sed") ;;
                 find)        missing_packages+=("findutils") ;;
+                ps)          missing_packages+=("procps") ;;
             esac
         fi
     done
@@ -1818,7 +1819,7 @@ print_banner() {
         print_header "$SCRIPT_VERSION"
         msg_detail "Debug log: ${DEBUG_LOG_FILE}"
     else
-        msg_info "Checkmk Update Script (TUI) v${SCRIPT_VERSION}"
+        msg_info "Checkmk Update Script v${SCRIPT_VERSION}"
         msg_info "Debug log: ${DEBUG_LOG_FILE}"
     fi
 }
