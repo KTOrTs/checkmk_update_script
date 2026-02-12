@@ -130,7 +130,7 @@ The script runs through 7 numbered phases with semantic output prefixes (`[OK]`,
 [OK]      Site started.
 
   ╔══════════════════════════════════════════╗
-  ║            Update Complete                ║
+  ║            Update Complete               ║
   ╚══════════════════════════════════════════╝
   Site:                  mysite
   Previous version:      2.3.0p24
