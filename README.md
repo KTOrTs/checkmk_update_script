@@ -33,13 +33,13 @@ Interactive update helper for **Checkmk Raw Edition** OMD sites on Debian/Ubuntu
 git clone https://github.com/KTOrTs/checkmk_update_script.git
 cd checkmk_update_script
 chmod +x cmkupdate.sh
-sudo ./cmkupdate.sh
+./cmkupdate.sh
 ```
 
 Non-interactive example:
 
 ```bash
-sudo ./cmkupdate.sh --yes --no-ui
+./cmkupdate.sh --yes --no-ui
 ```
 
 Dry-run (download only, no changes):
@@ -79,13 +79,13 @@ Missing dependencies (except `omd`) are installed automatically via `apt-get` on
 Interactive (recommended):
 
 ```bash
-sudo ./cmkupdate.sh
+./cmkupdate.sh
 ```
 
 Automation/CI (no prompts, no TUI):
 
 ```bash
-sudo ./cmkupdate.sh --yes --no-ui
+./cmkupdate.sh --yes --no-ui
 ```
 
 Dry-run (download only, keep the `.deb` in the temp directory):
@@ -97,13 +97,13 @@ Dry-run (download only, keep the `.deb` in the temp directory):
 Skip backup (not recommended):
 
 ```bash
-sudo ./cmkupdate.sh --no-backup
+./cmkupdate.sh --no-backup
 ```
 
 Disable colors:
 
 ```bash
-NO_COLOR=1 sudo ./cmkupdate.sh --no-ui
+NO_COLOR=1 ./cmkupdate.sh --no-ui
 ```
 
 ## What The Script Does
@@ -132,7 +132,7 @@ omd start <SITE_NAME>
 
 - The script prints a **debug log path** at startup, e.g. `/tmp/cmkupdate.*/checkmk_update_debug.log`.
 - If you hit APT/DPKG lock errors: wait for `unattended-upgrades` / `apt` to finish and re-run.
-- If `dpkg --audit` reports issues: fix with `sudo dpkg --configure -a` and `sudo apt-get -f install` before retrying.
+- If `dpkg --audit` reports issues: fix with `dpkg --configure -a` and `apt-get -f install` before retrying.
 
 ## Self-Update Notes
 
